@@ -34,7 +34,7 @@ def _idna(netloc: str) -> str:
         return ascii_netloc
 
 class WebPath:
-    __slots__ = ("_url", "_parts", "_trailing_slash", "_cache", "_cache_config", "_allow_auto_follow", "_enable_logging")
+    __slots__ = ("_url", "_parts", "_trailing_slash", "_cache", "_cache_config", "_allow_auto_follow", "_enable_logging", "_rate_limit", "_last_request_time")
     def __init__(self, url: str | "WebPath") -> None:
         self._url = str(url).strip()
         
@@ -55,6 +55,8 @@ class WebPath:
         self._cache_config = None
         self._allow_auto_follow = False
         self._enable_logging = False
+        self._rate_limit = None
+        self._last_request_time = 0
 
     def __str__(self) -> str:
         return self._url
@@ -170,6 +172,15 @@ class WebPath:
         new_path._cache_config = self._cache_config
         new_path._allow_auto_follow = self._allow_auto_follow
         new_path._enable_logging = enabled
+        return new_path
+
+    def with_rate_limit(self, requests_per_second: float = 1.0) -> "WebPath":
+        new_path = WebPath(self._url)
+        new_path._cache_config = self._cache_config
+        new_path._allow_auto_follow = self._allow_auto_follow
+        new_path._enable_logging = self._enable_logging
+        new_path._rate_limit = requests_per_second
+        new_path._last_request_time = 0
         return new_path
     
     def session(self, **kw):     # pragma: no skylos

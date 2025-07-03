@@ -503,6 +503,15 @@ def http_request(verb: str, url, *a: Any, retries: int | None = None, backoff: f
 
     if cache_config and 200 <= resp.status_code < 300:
         cache_config.set(verb, url_str, resp)
+    
+    if hasattr(url, '_rate_limit') and url._rate_limit:
+        import time
+        min_interval = 1.0 / url._rate_limit
+        elapsed = time.time() - getattr(url, '_last_request_time', 0)
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        url._last_request_time = time.time()
+
 
     if hasattr(url, '_enable_logging') and url._enable_logging:
         console = Console()

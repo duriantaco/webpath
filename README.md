@@ -116,9 +116,11 @@ webpath get https://httpbin.org/status/503 --retries 3 --backoff 0.5
 ```
 
 #### download with retries, back off and checksum
+```bash
 webpath download https://speed.hetzner.de/100MB.bin 100MB.bin \
                  --retries 4 --backoff 0.5 \
-                 --checksum 5be551ef1ce3…
+                 --checksum blahblahblah…
+```
 
 ### Flags for cli
 ```
@@ -150,8 +152,6 @@ GET https://api.coingecko.com/api/v3/coins/markets
      &sparkline=false
 ```
 
-We’ll turn that monstrosity into something *readable*.
-
 ---
 
 ## 2  |  Step by step with WebPath
@@ -159,7 +159,7 @@ We’ll turn that monstrosity into something *readable*.
 ```python
 from webpath import WebPath
 
-# Create a base path (it behaves like pathlib.Path)
+# create a base path (it behaves like pathlib.Path)
 api = WebPath("https://api.coingecko.com/api/v3")
 
 markets = api / "coins" / "markets"

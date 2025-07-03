@@ -9,8 +9,9 @@ HTTP library that makes APIs actually enjoyable to work with
 
 * **JSON shortcuts** - `find()`, `find_all()`, `extract()` with dot notation
 * **Request logging** - Auto request/response logging
-* **Smart caching** - Filters some sensitive headers automatically
-* **Advanced pagination** - Cycle detection and next-page finding
+* **Caching** - Filters some sensitive headers automatically
+* **Pagination** - Cycle detection and next page finding
+* **Rate Limiting** - Auto-throttle requests
 
 ## Why webpath?
 
@@ -44,7 +45,7 @@ pip install "webpath[progress]"
 
 ### Python API
 
-#### Build URLs like pathlib.Path
+#### 1. Build URLs like pathlib.Path
 
 ```python
 base  = WebPath("https://api.example.com/v1")
@@ -52,32 +53,32 @@ user  = base / "users" / 42
 print(user) # https://api.example.com/v1/users/42
 ```
 
-#### Add query params
+#### 2. Add query params
 ```python
 detail = user.with_query(fields=["name", "email"])
 print(detail) 
 # …/42?fields=name&fields=email
 ```
 
-#### One liner GET
+#### 3. One liner GET
 ```python
 resp = detail.get(timeout=5).json()
 print(resp["name"])
 ```
 
-#### auto retries + back off
+#### 4. Auto retries + back off
 ```python
 html = WebPath("https://httpbin.org/status/503").get(retries=3, backoff=0.5).text
 ```
 
-#### reuse a single session
+#### 5. Reuse a single session
 ```python
 with detail.session() as call:
     a = call("get").json()
     b = call("post", json={"hello": "world"}).json()
 ```
 
-#### async request (requires webpath[async])
+#### 6. Async request (requires webpath[async])
 ```python
 import asyncio
 
@@ -88,7 +89,7 @@ async def main():
 asyncio.run(main())
 ```
 
-#### download with progress + checksum
+#### 7. Download with progress + checksum
 ```python
 url  = WebPath("https://speed.hetzner.de/100MB.bin")
 path = url.download("100MB.bin", progress=True,
@@ -96,6 +97,31 @@ path = url.download("100MB.bin", progress=True,
 print("saved to", path)
 
 ```
+
+#### 8. Respect API rate limits
+
+```python
+api = WebPath("https://api.github.com").with_rate_limit(2.0)  # 2 requests/sec
+for user in ["octocat", "torvalds"]:
+    resp = api / "users" / user  # auto waits between calls
+    print(f"{resp.get().json()['name']}")
+```
+
+#### 9. Debug requests in real-time
+```python
+api = WebPath("https://api.github.com").with_logging()
+resp = (api / "users" / "octocat").get()
+
+# deep dive into the response
+resp.inspect()
+```
+
+#### **NOTE**: 
+
+- `with_logging()` = see timing for every request (example 9)
+- `inspect()` = deep dive into a specific response (example 9)
+
+#### Inspect 
 
 ### CLI Usage
 
@@ -132,9 +158,9 @@ Flag	Description	Default
 -b, --backoff	Back off factor in seconds	0.3
 ```
 
-# WebPath Tutorial — *Building a Tiny Crypto Dashboard with the CoinGecko API*
+# WebPath Tutorial
 
-## 1  |  CoinGecko’s API
+## Step 1 - CoinGecko’s API
 
 CoinGecko exposes an **unauthenticated** REST API at  
 `https://api.coingecko.com/api/v3/`.
@@ -154,7 +180,7 @@ GET https://api.coingecko.com/api/v3/coins/markets
 
 ---
 
-## 2  |  Step by step with WebPath
+## Step 2 - Step by step with WebPath
 
 ```python
 from webpath import WebPath
@@ -206,7 +232,7 @@ content-type  application/json
 
 ---
 
-## 3  |  Fetching & Caching
+## Step 3 - Fetching & Caching
 
 ```python
 data = url.with_cache(ttl=120).get().json()
@@ -218,7 +244,7 @@ data = url.with_cache(ttl=120).get().json()
 
 ---
 
-## 4  |  Extraction
+## Step 4 -  Extraction
 
 Each coin object looks like (truncated):
 
@@ -229,7 +255,7 @@ Each coin object looks like (truncated):
   "name": "Bitcoin",
   "current_price": 68123,
   "price_change_percentage_24h": -2.17,
-  ...
+  
 }
 ```
 
@@ -248,7 +274,7 @@ for coin in data:
 
 ---
 
-## 5  |  Print a Table (optional)
+## Step 5 - Print a Table (optional)
 
 ```python
 from tabulate import tabulate
@@ -275,7 +301,7 @@ console.print(
 
 ---
 
-## 6  |  Making It Reusable
+## Step 6 - Making It Reusable
 
 Create a tiny helper module `crypto.py`:
 
@@ -304,17 +330,11 @@ print(get_market(["solana", "toncoin"], "eur")[0]["current_price"])
 
 ---
 
-## 7  |  Going Further
+## Step 7 - Going Further
 
 1. **Pagination** – CoinGecko allows `page=`; chain `.paginate()` to stream *everything*
 2. **Async** – replace `.get()` with `.aget()` inside `get_market` after  
    `pip install "webpath[async]"`
 3. **Retries/Back off** – `url.get(retries=3, backoff=0.5)` for flaky networks
-4. **Downloads** – Need historical CSV dumps? Use `.download()` with checksums
+4. **Downloads** – Need historical csv dumps? Use `.download()` with checksums
 5. **CLI** – `webpath get "$(crypto_url)" -p` to poke around quickly
-
----
-
-## Finished!
-
-*Questions? Bugs?* -> [GitHub Issues](https://github.com/duriantaco/webpath/issues)

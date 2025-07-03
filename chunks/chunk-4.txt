@@ -25,7 +25,7 @@ def check_crypto_prices_with_shortcuts():
         price = response.find(f"{coin}.usd")
         change = response.find(f"{coin}.usd_24h_change")
         direction = "UP" if change > 0 else "DOWN"
-        print(f"   {coin}: ${price:,.2f} {direction} {change:.1f}%")
+        print(f"{coin}: ${price:,.2f} {direction} {change:.1f}%")
     
     print("\nUsing .find_all() with wildcards:")
     all_prices = response.find_all("*.usd")
@@ -42,31 +42,31 @@ def check_crypto_prices_with_shortcuts():
     btc_price, btc_change = response.extract("bitcoin.usd", "bitcoin.usd_24h_change")
     eth_price, eth_change = response.extract("ethereum.usd", "ethereum.usd_24h_change")
     
-    print(f"   Bitcoin: ${btc_price:,.2f} ({'UP' if btc_change > 0 else 'DOWN'} {btc_change:.1f}%)")
-    print(f"   Ethereum: ${eth_price:,.2f} ({'UP' if eth_change > 0 else 'DOWN'} {eth_change:.1f}%)")
+    print(f" Bitcoin: ${btc_price:,.2f} ({'UP' if btc_change > 0 else 'DOWN'} {btc_change:.1f}%)")
+    print(f" Ethereum: ${eth_price:,.2f} ({'UP' if eth_change > 0 else 'DOWN'} {eth_change:.1f}%)")
     
     print("\nUsing .search() to find all USD data:")
     usd_values = response.search("usd")
-    print(f"   Found {len(usd_values)} USD values")
+    print(f" Found {len(usd_values)} USD values")
     
     print("\nUsing .has_path() to check data availability:")
-    print(f"   Has Bitcoin data? {response.has_path('bitcoin')}")
-    print(f"   Has Bitcoin USD price? {response.has_path('bitcoin.usd')}")
-    print(f"   Has volume data? {response.has_path('bitcoin.usd_24h_vol')}")
-    print(f"   Has Dogecoin data? {response.has_path('dogecoin')}")
+    print(f" Has Bitcoin data? {response.has_path('bitcoin')}")
+    print(f" Has Bitcoin USD price? {response.has_path('bitcoin.usd')}")
+    print(f" Has volume data? {response.has_path('bitcoin.usd_24h_vol')}")
+    print(f"Has Dogecoin data? {response.has_path('dogecoin')}")
     
     print("\nUsing defaults for missing data:")
     doge_price = response.find("dogecoin.usd", default="Not requested")
     btc_volume = response.find("bitcoin.usd_24h_vol", default="Not available")
-    print(f"   Dogecoin price: {doge_price}")
-    print(f"   Bitcoin volume: {btc_volume}")
+    print(f" Dogecoin price: {doge_price}")
+    print(f" Bitcoin volume: {btc_volume}")
 
 def test_complex_api():
     print("\nTesting with detailed Bitcoin data:")
     
     try:
         api = WebPath("https://api.coingecko.com/api/v3").with_logging()
-        response = api.get("/coins/bitcoin")
+        response = (api / "coins" / "bitcoin").get()
         
         name = response.find("name")
         symbol = response.find("symbol")
@@ -74,22 +74,22 @@ def test_complex_api():
         market_cap = response.find("market_data.market_cap.usd")
         total_supply = response.find("market_data.total_supply")
         
-        print(f"   Coin: {name} ({symbol.upper()})")
-        print(f"   Price: ${current_price:,.2f}")
-        print(f"   Market Cap: ${market_cap:,.0f}")
-        print(f"   Total Supply: {total_supply:,.0f}")
+        print(f" Coin: {name} ({symbol.upper()})")
+        print(f" Price: ${current_price:,.2f}")
+        print(f" Market Cap: ${market_cap:,.0f}")
+        print(f" Total Supply: {total_supply:,.0f}")
         
         all_prices = response.find_all("market_data.current_price.*")
-        print(f"   Found prices in {len(all_prices)} currencies")
+        print(f" Found prices in {len(all_prices)} currencies")
         
         eur_price = response.find("market_data.current_price.eur")
         gbp_price = response.find("market_data.current_price.gbp")
         
-        if eur_price: print(f"   EUR: €{eur_price:,.2f}")
-        if gbp_price: print(f"   GBP: £{gbp_price:,.2f}")
+        if eur_price: print(f" EUR: €{eur_price:,.2f}")
+        if gbp_price: print(f" GBP: £{gbp_price:,.2f}")
         
     except Exception as e:
-        print(f"   API test failed: {e}")
+        print(f"API test failed: {e}")
 
 if __name__ == "__main__":
     check_crypto_prices_with_shortcuts()
@@ -101,8 +101,6 @@ import requests_mock, hashlib
 from webpath import WebPath
 import pytest
 import requests_mock
-from requests.exceptions import ConnectionError
-import requests
 
 def test_download(tmp_path):
     data      = b"x" * 1024
@@ -178,113 +176,159 @@ def test_pagination_max_pages_limit():
 def test_download_interrupted_cleanup(tmp_path):
     pass
 ========================================
-File: ./webpath/downloads.py
+File: ./webpath/cli.py
 ========================================
 from __future__ import annotations
-
-import hashlib
-import importlib
-import os
+import sys
+import json
+import typer
 from pathlib import Path
-from typing import Optional
+from rich import print as rprint
+from webpath.core import WebPath
 
-from webpath._http import http_request
+app = typer.Typer(add_completion=False, help="Tiny CLI gateway for webpath")
 
-def download_file(
-    url,
-    dest: str | os.PathLike,
-    *,
-    chunk: int = 8192,
-    progress: bool = True,
-    retries: int = 3,
-    backoff: float = 0.3,
-    checksum: Optional[str] = None,
-    algorithm: str = "sha256",
-    **req_kw,
+@app.command()
+def join(base: str, *segments: str):     # pragma: no skylos
+    """Echo base / seg1 / seg2 ..."""
+    url = WebPath(base)
+    for seg in segments:
+        url = url / seg
+    rprint(str(url))
+
+@app.command()
+def get(
+    url: str,
+    pretty: bool = typer.Option(False, "--pretty", "-p"),
+    retries: int = typer.Option(0, "--retries", "-r"),
+    backoff: float = typer.Option(0.3, "--backoff", "-b"),
 ):
-    dest = Path(dest)
-    bar = None
+    r = WebPath(url).get(retries=retries, backoff=backoff)
+    if pretty and "application/json" in r.headers.get("content-type", ""):
+        rprint(json.dumps(r.json(), indent=2))
+    else:
+        sys.stdout.buffer.write(r.content)
+
+
+@app.command()
+def download(
+    url: str,
+    dest: Path = typer.Argument(..., exists=False, dir_okay=False, writable=True),
+    retries: int = typer.Option(3, "--retries", "-r"),
+    backoff: float = typer.Option(0.3, "--backoff", "-b"),
+    checksum: str | None = typer.Option(None, "--checksum", "-c", help="Expected hex digest"),
+):
+    wp = WebPath(url)
+    wp.download(dest, retries=retries, backoff=backoff, checksum=checksum)
+    rprint(f"[green] * [/green] Saved to {dest}")
+
+def _main_():
+    app()
+
+if __name__ == "__main__":
+    _main_()
+========================================
+File: ./tests/test_security.py
+========================================
+
+import requests_mock
+from webpath import WebPath
+
+def test_ssrf_protection_disabled_by_default():
+    with requests_mock.Mocker() as m:
+        m.get("https://api.example.com/data", json={
+            "next_url": "http://localhost:8080/internal"
+        })
+        
+        resp = WebPath("https://api.example.com/data").get()
+        result = resp / "next_url"
+        assert result == "http://localhost:8080/internal"
+        assert m.call_count == 1
+
+def test_ssrf_protection_blocks_localhost():
+    with requests_mock.Mocker() as m:
+        m.get("https://api.example.com/data", json={
+            "redirect": "http://127.0.0.1:6379/evil"
+        })
+        
+        resp = WebPath("https://api.example.com/data").get()
+        # Tneed to add _allow_auto_follow to WebPath.. for now test that it returns string instead of following
+        result = resp / "redirect"
+        assert result == "http://127.0.0.1:6379/evil"
+
+def test_cache_excludes_sensitive_headers():
+    """Cache should not store sensitive authentication headers"""
+    import tempfile
+    from pathlib import Path
     
-    try:
-        r = http_request("get", url, stream=True, retries=retries, backoff=backoff, **req_kw)
-        r.raise_for_status()
-
-        total = int(r.headers.get("content-length", 0))
-        hasher = hashlib.new(algorithm) if checksum else None
-
-        if progress:
-            try:
-                mod = importlib.import_module("tqdm")
-                if hasattr(mod, "tqdm"):
-                    bar = mod.tqdm(total=total, unit="B", unit_scale=True, leave=False)
-            except ModuleNotFoundError:
-                pass
-
-        with dest.open("wb") as fh:
-            for block in r.iter_content(chunk):
-                if block:
-                    fh.write(block)
-                    if hasher:
-                        hasher.update(block)
-                    if bar:
-                        bar.update(len(block))
-                        
-    except Exception:
-        if dest.exists():
-            dest.unlink(missing_ok=True)
-        raise
-    finally:
-        if bar:
-            bar.close()
-
-    if checksum and hasher and hasher.hexdigest() != checksum.lower():
-        dest.unlink(missing_ok=True)
-        raise ValueError(
-            f"Checksum mismatch for {dest.name}: "
-            f"expected {checksum}, got {hasher.hexdigest()}"
-        )
-    return dest
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir)
+        
+        with requests_mock.Mocker() as m:
+            m.get("https://api.example.com/secret", 
+                  text="sensitive data",
+                  headers={
+                      "Authorization": "Bearer secret-token",
+                      "X-API-Key": "api-key-123",
+                      "Content-Type": "application/json"
+                  })
+            
+            url = WebPath("https://api.example.com/secret").with_cache(cache_dir=cache_dir)
+            resp = url.get()
+            
+            cache_files = list(cache_dir.glob("*.json"))
+            assert len(cache_files) == 1
+            
+            import json
+            with cache_files[0].open() as f:
+                cached = json.load(f)
+            
+            headers = cached["headers"]
+            assert "authorization" not in headers
+            assert "x-api-key" not in headers
+            assert "Content-Type" in headers
 ========================================
-File: ./tests/test_url_ops.py
+File: ./tests/test_error_handling.py
 ========================================
+
+import requests_mock
 from webpath import WebPath
 import pytest
 
-def test_join_and_query():
-    api = WebPath("https://a.com/v1")
-    url = (api / "users" / 5).with_query(foo=["x", "y"])
-    assert str(url) == "https://a.com/v1/users/5?foo=x&foo=y"
-    assert url.parent.name == "users"
-    assert url.suffix == ""
+def test_json_parsing_error_fallback():
+    with requests_mock.Mocker() as m:
+        m.get("https://api.com/broken", text="{invalid json}")
+        
+        resp = WebPath("https://api.com/broken").get()
+        # json_data should fall back to empty dict
+        assert resp.json_data == {}
+        
+        with pytest.raises(Exception):
+            resp.json()
 
-def test_trailing_slash_preserved():
-    a = WebPath("https://x.org/folder/")
-    b = a / "file"
-    assert str(b) == "https://x.org/folder/file"
-    assert str(a.ensure_trailing_slash()) == "https://x.org/folder/"
+def test_response_key_error_handling():
+    """handle missing keys in JSON responses"""
+    with requests_mock.Mocker() as m:
+        m.get("https://api.com/data", json={"exists": "value"})
+        
+        resp = WebPath("https://api.com/data").get()
+        
+        assert resp / "exists" == "value"
+        
+        with pytest.raises(KeyError):
+            resp / "missing"
 
-def test_fragment_and_trailing_slash():
-    u = WebPath("https://x.org/y/").with_fragment("sec-2")
-    assert str(u) == "https://x.org/y/#sec-2"
-    assert u.ensure_trailing_slash().path.endswith("/")
-
-def test_suffix_logic():
-    png = WebPath("https://x.org/logo.png")
-    assert png.suffix == ".png"
-    assert png.name == "logo.png"
-
-def test_idna_conversion():
-    url = WebPath("https://bücher.de/") / "seite"
-    assert url.host == "xn--bcher-kva.de"
-    assert str(url) == "https://bücher.de/seite"
-
-def test_percent_encoding():
-    u = WebPath("https://x.org") / "white space" / "✓"
-    assert str(u) == "https://x.org/white%20space/%E2%9C%93"
-
-def test_non_http_scheme_get():
-    with pytest.raises(ValueError, match="Only http/https schemes supported"):
-        url = WebPath("ftp://example.com/file")
+def test_http_error_messages():
+    """should provide helpful error messages"""
+    with requests_mock.Mocker() as m:
+        m.get("https://api.com/401", status_code=401, json={"error": "Invalid token"})
+        m.get("https://api.com/429", status_code=429, headers={"Retry-After": "60"})
+        
+        with pytest.raises(Exception, match="Authentication failed.*Invalid token"):
+            WebPath("https://api.com/401").get()
+        
+        with pytest.raises(Exception, match="Rate limited.*60 seconds"):
+            WebPath("https://api.com/429").get()
 ========================================
 File: ./tests/test_pagination.py
 ========================================
@@ -323,3 +367,12 @@ def test_pagination_max_pages_limit():
         
         assert len(pages) == 3
         assert m.call_count >= 3
+========================================
+File: ./.gitignore
+========================================
+venv
+.pytest_cache
+__pycache__
+*.egg-info
+dist
+build

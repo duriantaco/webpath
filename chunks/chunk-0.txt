@@ -44,7 +44,7 @@ class CachedResponse:
     def json(self):
         return json.loads(self.content)
     
-    def raise_for_status(self):
+    def raise_for_status(self): # pragma: no skylos
         if 400 <= self.status_code < 600:
             raise requests.HTTPError(f"{self.status_code} Client Error")
         
@@ -111,7 +111,7 @@ class WebResponse:
         search_key = key if case_sensitive else key.lower()
         return self._search_recursive(data, search_key, case_sensitive)
 
-    def extract(self, *paths, flatten: bool = False):
+    def extract(self, *paths, flatten: bool = False): # pragma: no skylos
         results = []
         for path in paths:
             if '*' in path:
@@ -149,7 +149,7 @@ class WebResponse:
         
         for item in current_items:
             if current_part == '*':
-                # wildcard  - collect all items
+                # wildcard .. collect all items
                 if isinstance(item, dict):
                     next_items.extend(item.values())
                 elif isinstance(item, list):
@@ -288,7 +288,7 @@ class WebResponse:
     def values(self):
         data = self.json_data
         return data.values() if isinstance(data, dict) else []
-    
+
     def items(self):
         data = self.json_data
         return data.items() if isinstance(data, dict) else []
@@ -356,7 +356,7 @@ class WebResponse:
         
         return curl_cmd
 
-    def paginate(self, max_pages=100, next_key=None, data_key=None):
+    def paginate(self, max_pages=100, next_key=None):
         current_page = self
         page_count = 0
         visited_urls = set()
@@ -510,6 +510,15 @@ def http_request(verb: str, url, *a: Any, retries: int | None = None, backoff: f
 
     if cache_config and 200 <= resp.status_code < 300:
         cache_config.set(verb, url_str, resp)
+    
+    if hasattr(url, '_rate_limit') and url._rate_limit:
+        import time
+        min_interval = 1.0 / url._rate_limit
+        elapsed = time.time() - getattr(url, '_last_request_time', 0)
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        url._last_request_time = time.time()
+
 
     if hasattr(url, '_enable_logging') and url._enable_logging:
         console = Console()

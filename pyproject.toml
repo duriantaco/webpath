@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webpath"
+version = "0.2.0.dev0"
+description = "Pathlib-like URLs with first-class Requests + optional async"
+authors = [{ name="oha", email="aaronoh2015@gmail.com" }]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "requests>=2.31",
+    "typer>=0.16.0",
+    "rich>=14.0.0",
+    "pydantic"
+]
+
+[project.optional-dependencies]
+async = ["httpx>=0.27"]
+
+progress = ["tqdm>=4.66"]
+
+dev = [
+    "pytest>=7.4",
+    "requests_mock>=1.12",
+    "tqdm>=4.66",
+    "httpx>=0.28",
+]
+
+[project.urls]
+Homepage = "https://github.com/duriantaco/webpath"
+
+[project.scripts]
+webpath = "webpath.cli:_main_"
+
+[tool.setuptools.package-data]
+"webpath" = ["py.typed"]

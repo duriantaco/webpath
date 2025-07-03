@@ -1,0 +1,336 @@
+================================================================================
+CHUNK 3 OF 5
+================================================================================
+
+========================================
+File: ./examples/eg_1.py
+========================================
+from webpath import WebPath
+from collections import Counter
+from datetime import datetime, timedelta
+
+print("=" * 80)
+print("---- BEFORE: Using requests + manual everything ----")
+print("=" * 80)
+
+before_code = '''import requests
+from urllib.parse import urlencode, urljoin
+from collections import Counter
+from datetime import datetime, timedelta
+import time
+
+def analyze_trending_languages_old():
+    base_url = "https://api.github.com"
+    
+    # step 1: build the  search URL with query parameters
+    one_week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    params = {
+        'q': f'created:>{one_week_ago}',
+        'sort': 'stars',
+        'order': 'desc',
+        'per_page': 10
+    }
+    
+    search_url = urljoin(base_url, '/search/repositories')
+    query_string = urlencode(params)
+    full_url = f"{search_url}?{query_string}"
+    
+    try:
+        # step2: get the trending repos
+        resp = requests.get(full_url, headers={'Accept': 'application/vnd.github.v3+json'})
+        resp.raise_for_status()
+        search_results = resp.json()
+        
+        language_counts = Counter()
+        
+        # step3: loop through the results and get 5 
+        for repo in search_results.get('items', [])[:5]:
+            if repo.get('language'):
+                language_counts[repo['language']] += 2
+            
+            # Step 4: Get contributors URL and fetch
+            contributors_url = repo.get('contributors_url')
+            if not contributors_url:
+                continue
+                
+            try:
+                contrib_resp = requests.get(contributors_url, params={'per_page': 5})
+                contrib_resp.raise_for_status()
+                contributors = contrib_resp.json()
+                
+                # last step another loop
+                for contributor in contributors[:3]:
+                    user_url = contributor.get('url')
+                    if not user_url:
+                        continue
+                    
+                    try:
+                        user_resp = requests.get(user_url)
+                        user_resp.raise_for_status()
+                        user_data = user_resp.json()
+                        
+                        repos_url = user_data.get('repos_url')
+                        if not repos_url:
+                            continue
+                        
+                        repos_resp = requests.get(repos_url, params={'per_page': 10, 'sort': 'stars'})
+                        repos_resp.raise_for_status()
+                        user_repos = repos_resp.json()
+                        
+                        for repo in user_repos[:5]:
+                            if repo.get('language'):
+                                language_counts[repo['language']] += 1
+                                
+                    except requests.RequestException:
+                        continue
+                        
+            except requests.RequestException:
+                continue
+            
+            time.sleep(0.1)  # Be nice to GitHub's API
+        
+        return language_counts.most_common(10)
+        
+    except requests.RequestException as e:
+        print(f"Error: {e}")
+        return []
+
+results = analyze_trending_languages_old()
+'''
+
+print(before_code)
+
+print("\n" + "=" * 80)
+print("AFTER: Using WebPath (24 lines)")
+print("=" * 80)
+
+after_code = '''from webpath import WebPath
+from collections import Counter
+from datetime import datetime, timedelta
+
+def analyze_trending_languages_new():
+    api = WebPath("https://api.github.com")
+    
+    one_week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    trending = (api / "search" / "repositories").with_query(
+        q=f'created:>{one_week_ago}',
+        sort='stars',
+        order='desc',
+        per_page=10
+    ).get()
+    
+    language_counts = Counter()
+    
+    # nav through results naturally
+    for i, repo in enumerate(trending['items'][:5]):
+        if repo.get('language'):
+            language_counts[repo['language']] += 2
+        
+        contributors = trending / 'items' / i / 'contributors_url'
+        for j in range(min(3, len(contributors.json_data))):
+            user = contributors / j / 'url'
+            user_repos = user / 'repos_url'
+            
+            for repo in user_repos.json_data[:5]:
+                if repo.get('language'):
+                    language_counts[repo['language']] += 1
+    
+    return language_counts.most_common(10)
+
+results = analyze_trending_languages_new()
+'''
+
+print(after_code)
+
+print("\n" + "=" * 80)
+print("RUNNING THE WEBPATH VERSION")
+print("=" * 80)
+
+####################actual wp code to fetch trending languages
+
+api = WebPath("https://api.github.com")
+
+print("\nFetching this week's trending repositories...")
+one_week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+trending = (api / "search" / "repositories").with_query(
+    q=f'created:>{one_week_ago} stars:>100',  
+    sort='stars',
+    order='desc', 
+    per_page=20
+).get()
+
+languages = Counter()
+for repo in trending['items']:
+    if repo.get('language'):
+        languages[repo['language']] += 1
+
+print(f"\nLanguages in {len(trending['items'])} trending repos:")
+for lang, count in languages.most_common(8):
+    bar = "*" * (count * 2)
+    print(f"{lang:12} {bar} {count}")
+========================================
+File: ./webpath/cli.py
+========================================
+from __future__ import annotations
+import sys
+import json
+import typer
+from pathlib import Path
+from rich import print as rprint
+from webpath.core import WebPath
+
+app = typer.Typer(add_completion=False, help="Tiny CLI gateway for webpath")
+
+@app.command()
+def join(base: str, *segments: str):
+    """Echo base / seg1 / seg2 ..."""
+    url = WebPath(base)
+    for seg in segments:
+        url = url / seg
+    rprint(str(url))
+
+@app.command()
+def get(
+    url: str,
+    pretty: bool = typer.Option(False, "--pretty", "-p"),
+    retries: int = typer.Option(0, "--retries", "-r"),
+    backoff: float = typer.Option(0.3, "--backoff", "-b"),
+):
+    r = WebPath(url).get(retries=retries, backoff=backoff)
+    if pretty and "application/json" in r.headers.get("content-type", ""):
+        rprint(json.dumps(r.json(), indent=2))
+    else:
+        sys.stdout.buffer.write(r.content)
+
+
+@app.command()
+def download(
+    url: str,
+    dest: Path = typer.Argument(..., exists=False, dir_okay=False, writable=True),
+    retries: int = typer.Option(3, "--retries", "-r"),
+    backoff: float = typer.Option(0.3, "--backoff", "-b"),
+    checksum: str | None = typer.Option(None, "--checksum", "-c", help="Expected hex digest"),
+):
+    wp = WebPath(url)
+    wp.download(dest, retries=retries, backoff=backoff, checksum=checksum)
+    rprint(f"[green] * [/green] Saved to {dest}")
+
+def _main_():
+    app()
+
+if __name__ == "__main__":
+    _main_()
+========================================
+File: ./examples/eg_3_json_test.py
+========================================
+from webpath import WebPath
+
+def test_jsonplaceholder_users():
+    print("Testing JSON Shortcuts with JSONPlaceholder API (Users)\n")
+    
+    api = WebPath("https://jsonplaceholder.typicode.com").with_logging()
+    
+    response = (api / "users").get()
+    
+    print("Using .find() for nested user data:")
+    
+    for i in range(3):
+        name = response.find(f"{i}.name")
+        email = response.find(f"{i}.email")
+        city = response.find(f"{i}.address.city")
+        company = response.find(f"{i}.company.name")
+        website = response.find(f"{i}.website")
+        
+        print(f"   User {i+1}: {name}")
+        print(f"     Email: {email}")
+        print(f"     City: {city}")
+        print(f"     Company: {company}")
+        print(f"     Website: {website}")
+        print()
+
+def test_jsonplaceholder_posts():
+    api = WebPath("https://jsonplaceholder.typicode.com").with_logging()
+    
+    response = (api / "posts").get()
+    
+    print(f"\nFound {len(response.json_data)} posts")
+    
+    all_titles = response.find_all("*.title")
+    print("\nFirst 5 post titles:")
+    for i, title in enumerate(all_titles[:5]):
+        print(f"   {i+1}. {title}")
+
+def test_single_user():
+    api = WebPath("https://jsonplaceholder.typicode.com").with_logging()
+    
+    response = (api / "users" / "1").get()
+    
+    lat = response.find("address.geo.lat")
+    lng = response.find("address.geo.lng")
+    
+    print(f"   Name: {response.find('name')}")
+    print(f"   Coordinates: {lat}, {lng}")
+
+if __name__ == "__main__":
+    test_jsonplaceholder_users()
+    test_jsonplaceholder_posts() 
+    test_single_user()
+========================================
+File: ./tests/test_query_params.py
+========================================
+from webpath import WebPath
+
+def test_query_with_lists():
+    url = WebPath("https://api.com").with_query(tags=["python", "web"], limit=10)
+    assert "tags=python" in str(url)
+    assert "tags=web" in str(url)
+    assert "limit=10" in str(url)
+
+def test_query_with_none_removes_param():
+    url = WebPath("https://api.com?existing=value&remove=old")
+    updated = url.with_query(remove=None, new="added")
+    
+    assert "remove=" not in str(updated)
+    assert "existing=value" in str(updated)
+    assert "new=added" in str(updated)
+
+def test_query_preserves_existing():
+    """with_query should preserve existing parameters"""
+    url = WebPath("https://api.com?keep=this&modify=old")
+    updated = url.with_query(modify="new", add="more")
+    
+    assert "keep=this" in str(updated)
+    assert "modify=new" in str(updated)
+    assert "add=more" in str(updated)
+    assert "modify=old" not in str(updated)
+
+def test_query_with_tuples():
+    url = WebPath("https://api.com").with_query(coords=(1.23, 4.56))
+    assert "coords=1.23" in str(url)
+    assert "coords=4.56" in str(url)
+========================================
+File: ./tests/test_async_cleanup.py
+========================================
+import asyncio
+import pytest
+from webpath import WebPath
+
+@pytest.mark.asyncio
+async def test_async_client_cleanup():
+    resp = await WebPath("https://httpbin.org/json").aget()
+    assert resp.status_code == 200
+    
+    resp2 = await WebPath("https://httpbin.org/uuid").aget()
+    assert resp2.status_code == 200
+========================================
+File: ./webpath/__init__.py
+========================================
+from webpath.core import WebPath
+from webpath._http import WebResponse
+
+__all__ = ["WebPath", "WebResponse"]
+__version__ = "0.2.0"
+========================================
+File: ./.gitignore
+========================================
+venv

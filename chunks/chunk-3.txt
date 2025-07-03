@@ -1,0 +1,348 @@
+================================================================================
+CHUNK 4 OF 5
+================================================================================
+
+========================================
+File: ./README.md
+========================================
+# webpath
+
+The only HTTP library that makes APIs actually enjoyable to work with
+
+* **JSON shortcuts** - `find()`, `find_all()`, `extract()` with dot notation
+* **Request logging** - Beautiful automatic request/response logging
+* **Smart caching** - Filters sensitive headers automatically
+* **Advanced pagination** - Cycle detection and smart next-page finding
+* Path-style `/` joining, `.parent`, `.name`, `.suffix`
+
+## Why webpath?
+
+**vs requests/httpx:**
+- Manual JSON navigation: `resp.json()["data"]["users"][0]["name"]`
+- Intuitive shortcuts: `resp.find("data.users.0.name")`
+
+**vs other URL builders:**
+- No HTTP client integration
+- Seamless URL building + requests + JSON processing
+
+**vs debugging tools:**
+- Separate tools for logging/inspection
+- Built-in logging, response inspection, cURL generation
+
+## Installation
+
+```bash
+# core features
+pip install webpath
+
+# async helpers (adds httpx)
+pip install "webpath[async]"
+
+# progress-bar downloads (adds tqdm)
+pip install "webpath[progress]"
+
+```
+
+## Quick Start
+
+### Python API
+
+#### Build URLs like pathlib.Path
+
+```python
+base  = WebPath("https://api.example.com/v1")
+user  = base / "users" / 42
+print(user)                       # https://api.example.com/v1/users/42
+```
+
+#### Add query params
+```python
+detail = user.with_query(fields=["name", "email"])
+print(detail)                     # …/42?fields=name&fields=email
+```
+
+#### One-liner GET
+```python
+resp = detail.get(timeout=5).json()
+print(resp["name"])
+```
+
+#### auto retries + back-off
+```python
+html = WebPath("https://httpbin.org/status/503").get(retries=3, backoff=0.5).text
+```
+
+#### reuse a single session
+```python
+with detail.session() as call:
+    a = call("get").json()
+    b = call("post", json={"hello": "world"}).json()
+```
+
+#### async request (requires webpath[async])
+```python
+import asyncio
+
+async def main():
+    data = await detail.aget(timeout=5)
+    print(data.json())
+
+asyncio.run(main())
+```
+
+#### download with progress + checksum
+```python
+url  = WebPath("https://speed.hetzner.de/100MB.bin")
+path = url.download("100MB.bin", progress=True,
+                    checksum="5be551ef1ce3…")   # sha256
+print("saved to", path)
+
+```
+
+### CLI Usage
+
+#### Join path segments
+```bash
+webpath join https://api.example.com/v1 users 42
+#### https://api.example.com/v1/users/42
+```
+
+#### simple GET (stdout)
+```bash
+webpath get https://api.github.com/repos/python/cpython -p | jq '.stargazers_count'
+```
+
+#### GET with retry/back-off
+```bash
+webpath get https://httpbin.org/status/503 --retries 3 --backoff 0.5
+```
+
+#### download with retries, back-off and checksum
+webpath download https://speed.hetzner.de/100MB.bin 100MB.bin \
+                 --retries 4 --backoff 0.5 \
+                 --checksum 5be551ef1ce3…
+
+### Flags for cli
+```
+Options:
+
+Flag	Description	Default
+-p, --pretty	Pretty-print JSON responses	off
+-r, --retries	Number of retry attempts	0
+-b, --backoff	Back-off factor in seconds	0.3
+```
+
+## Real World Use
+
+Look into `/examples` folder
+========================================
+File: ./webpath/cache.py
+========================================
+from __future__ import annotations
+
+from typing import Optional
+import hashlib
+import json
+import time
+from pathlib import Path
+
+class CacheConfig:
+    def __init__(self, ttl: int = 300, cache_dir: Optional[Path] = None):
+        self.ttl = ttl
+        self.cache_dir = cache_dir or Path.home() / ".webpath" / "cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _cache_key(self, verb: str, url: str) -> str:
+        key_str = f"{verb.upper()}:{url}"
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
+    def _cache_path(self, verb: str, url: str) -> Path:
+        key = self._cache_key(verb, url)
+        return self.cache_dir / f"{key}.json"
+    
+    def get(self, verb: str, url: str) -> Optional[dict]:
+        cache_path = self._cache_path(verb, url)
+        if not cache_path.exists():
+            return None
+        
+        try:
+            with cache_path.open('r') as f:
+                cached = json.load(f)
+            
+            if time.time() - cached['timestamp'] > self.ttl:
+                cache_path.unlink(missing_ok=True)
+                return None
+            
+            return cached
+        except (json.JSONDecodeError, KeyError, OSError):
+            cache_path.unlink(missing_ok=True)
+            return None
+    
+    def set(self, verb: str, url: str, response) -> None:
+        cache_path = self._cache_path(verb, url)
+        
+        sensitive_headers = {
+            'authorization', 'cookie', 'x-api-key', 'x-auth-token', 
+            'authentication', 'proxy-authorization'
+        }
+        safe_headers = {
+            k: v for k, v in response.headers.items() 
+            if k.lower() not in sensitive_headers
+        }
+        
+        cached = {
+            'timestamp': time.time(),
+            'status_code': response.status_code,
+            'headers': safe_headers,
+            'content': response.content.decode('utf-8', errors='ignore'),
+            'url': response.url
+        }
+        
+        try:
+            with cache_path.open('w') as f:
+                json.dump(cached, f)
+        except OSError:
+            pass
+========================================
+File: ./tests/test_security.py
+========================================
+
+import requests_mock
+from webpath import WebPath
+
+def test_ssrf_protection_disabled_by_default():
+    with requests_mock.Mocker() as m:
+        m.get("https://api.example.com/data", json={
+            "next_url": "http://localhost:8080/internal"
+        })
+        
+        resp = WebPath("https://api.example.com/data").get()
+        result = resp / "next_url"
+        assert result == "http://localhost:8080/internal"
+        assert m.call_count == 1
+
+def test_ssrf_protection_blocks_localhost():
+    with requests_mock.Mocker() as m:
+        m.get("https://api.example.com/data", json={
+            "redirect": "http://127.0.0.1:6379/evil"
+        })
+        
+        resp = WebPath("https://api.example.com/data").get()
+        # Tneed to add _allow_auto_follow to WebPath.. for now test that it returns string instead of following
+        result = resp / "redirect"
+        assert result == "http://127.0.0.1:6379/evil"
+
+def test_cache_excludes_sensitive_headers():
+    """Cache should not store sensitive authentication headers"""
+    import tempfile
+    from pathlib import Path
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir)
+        
+        with requests_mock.Mocker() as m:
+            m.get("https://api.example.com/secret", 
+                  text="sensitive data",
+                  headers={
+                      "Authorization": "Bearer secret-token",
+                      "X-API-Key": "api-key-123",
+                      "Content-Type": "application/json"
+                  })
+            
+            url = WebPath("https://api.example.com/secret").with_cache(cache_dir=cache_dir)
+            resp = url.get()
+            
+            cache_files = list(cache_dir.glob("*.json"))
+            assert len(cache_files) == 1
+            
+            import json
+            with cache_files[0].open() as f:
+                cached = json.load(f)
+            
+            headers = cached["headers"]
+            assert "authorization" not in headers
+            assert "x-api-key" not in headers
+            assert "Content-Type" in headers
+========================================
+File: ./tests/test_error_handling.py
+========================================
+
+import requests_mock
+from webpath import WebPath
+import pytest
+
+def test_json_parsing_error_fallback():
+    with requests_mock.Mocker() as m:
+        m.get("https://api.com/broken", text="{invalid json}")
+        
+        resp = WebPath("https://api.com/broken").get()
+        # json_data should fall back to empty dict
+        assert resp.json_data == {}
+        
+        with pytest.raises(Exception):
+            resp.json()
+
+def test_response_key_error_handling():
+    """handle missing keys in JSON responses"""
+    with requests_mock.Mocker() as m:
+        m.get("https://api.com/data", json={"exists": "value"})
+        
+        resp = WebPath("https://api.com/data").get()
+        
+        assert resp / "exists" == "value"
+        
+        with pytest.raises(KeyError):
+            resp / "missing"
+
+def test_http_error_messages():
+    """should provide helpful error messages"""
+    with requests_mock.Mocker() as m:
+        m.get("https://api.com/401", status_code=401, json={"error": "Invalid token"})
+        m.get("https://api.com/429", status_code=429, headers={"Retry-After": "60"})
+        
+        with pytest.raises(Exception, match="Authentication failed.*Invalid token"):
+            WebPath("https://api.com/401").get()
+        
+        with pytest.raises(Exception, match="Rate limited.*60 seconds"):
+            WebPath("https://api.com/429").get()
+========================================
+File: ./pyproject.toml
+========================================
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webpath"
+version = "0.2.0.dev0"
+description = "Pathlib-like URLs with first-class Requests + optional async"
+authors = [{ name="oha", email="aaronoh2015@gmail.com" }]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "requests>=2.31",
+    "typer>=0.16.0",
+    "rich>=14.0.0",
+    "pydantic"
+]
+
+[project.optional-dependencies]
+async = ["httpx>=0.27"]
+
+progress = ["tqdm>=4.66"]
+
+dev = [
+    "pytest>=7.4",
+    "requests_mock>=1.12",
+    "tqdm>=4.66",
+    "httpx>=0.28",
+]
+
+[project.urls]
+Homepage = "https://github.com/duriantaco/webpath"
+
+[project.scripts]
+webpath = "webpath.cli:_main_"
+
+[tool.setuptools.package-data]
+"webpath" = ["py.typed"]

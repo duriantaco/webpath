@@ -1,0 +1,314 @@
+================================================================================
+CHUNK 2 OF 5
+================================================================================
+
+========================================
+File: ./webpath/core.py
+========================================
+from __future__ import annotations
+
+import functools
+from typing import Any, Dict, List, Callable, Optional
+import threading
+from collections import OrderedDict
+from pathlib import Path
+from urllib.parse import quote, urlencode, urlunsplit, parse_qsl, urlsplit
+
+from webpath._http import http_request, session_cm, aget_async
+from webpath.downloads import download_file
+from webpath.cache import CacheConfig
+
+_IDNA_CACHE: OrderedDict[str, str] = OrderedDict()
+_IDNA_CACHE_LOCK = threading.RLock()
+_IDNA_CACHE_MAX_SIZE = 1000
+_HTTP_VERBS = ("get", "post", "put", "patch", "delete", "head", "options")
+
+def _idna(netloc: str) -> str:
+    with _IDNA_CACHE_LOCK:
+        if netloc in _IDNA_CACHE:
+            _IDNA_CACHE.move_to_end(netloc)
+            return _IDNA_CACHE[netloc]
+        
+        try:
+            ascii_netloc = netloc.encode("idna").decode("ascii")
+        except UnicodeError:
+            ascii_netloc = netloc
+        
+        if len(_IDNA_CACHE) >= _IDNA_CACHE_MAX_SIZE:
+            _IDNA_CACHE.popitem(last=False)
+        
+        _IDNA_CACHE[netloc] = ascii_netloc
+        return ascii_netloc
+
+class WebPath:
+    __slots__ = ("_url", "_parts", "_trailing_slash", "_cache", "_cache_config", "_allow_auto_follow", "_enable_logging")
+    def __init__(self, url: str | "WebPath") -> None:
+        self._url = str(url).strip()
+        
+        if not self._url:
+            raise ValueError("URL cannot be empty")
+        
+        self._parts = urlsplit(self._url)
+        
+        if not self._parts.scheme:
+            raise ValueError(f"URL must include scheme (http/https): {self._url}")
+        if self._parts.scheme not in ('http', 'https'):
+            raise ValueError(f"Only http/https schemes supported: {self._parts.scheme}")
+        if not self._parts.netloc:
+            raise ValueError(f"URL must include hostname: {self._url}")
+        
+        self._trailing_slash = self._url.endswith("/") and not self._parts.path.endswith("/")
+        self._cache = {}
+        self._cache_config = None
+        self._allow_auto_follow = False
+        self._enable_logging = False
+
+    def __str__(self) -> str:
+        return self._url
+
+    def __repr__(self) -> str:
+        return f"WebPath({self._url!r})"
+
+    def __eq__(self, other) -> bool:
+        """Enable comparison with strings and other WebPaths"""
+        if isinstance(other, WebPath):
+            return self._url == other._url
+        elif isinstance(other, str):
+            return self._url == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self._url)
+
+    def __bool__(self) -> bool:
+        return bool(self._url)
+
+    # internal helper
+    def _memo(self, key: str, factory: Callable[[], Any]):
+        cache = self._cache
+        if key not in cache:
+            cache[key] = factory()
+        return cache[key]
+
+    @property
+    def query(self) -> Dict[str, List[str] | str]:
+        return self._memo(
+            "query",
+            lambda: dict(parse_qsl(self._parts.query, keep_blank_values=True)),
+        )
+
+    @property
+    def scheme(self) -> str:
+        return self._parts.scheme
+
+    @property
+    def netloc(self) -> str:
+        return self._parts.netloc
+
+    @property
+    def host(self) -> str:
+        return _idna(self._parts.netloc.split("@")[-1].split(":")[0])
+
+    @property
+    def port(self) -> str | None:
+        if ":" in self._parts.netloc:
+            return self._parts.netloc.rsplit(":", 1)[1]
+        return None
+
+    @property
+    def path(self) -> str:
+        return self._parts.path
+
+    def __truediv__(self, other: str | int | "WebPath") -> "WebPath":
+        seg = quote(str(other).lstrip("/"))
+        new_path = self._parts.path.rstrip("/") + "/" + seg if self._parts.path else "/" + seg
+        return self._replace(path=new_path)
+
+    @property
+    def parent(self) -> "WebPath":
+        parts = self._parts.path.rstrip("/").split("/")
+        parent_path = "/".join(parts[:-1]) or "/"
+        return self._replace(path=parent_path)
+
+    @property
+    def name(self) -> str:
+        return self._parts.path.rstrip("/").split("/")[-1]
+
+    @property
+    def suffix(self) -> str:
+        dot = self.name.rfind(".")
+        return self.name[dot:] if dot != -1 else ""
+
+    def ensure_trailing_slash(self) -> "WebPath":
+        return self if self._url.endswith("/") else WebPath(self._url + "/")
+
+    def with_query(self, **params: Any) -> "WebPath":
+        merged = dict(self.query)
+        
+        for key, value in params.items():
+            if isinstance(value, (list, tuple)):
+                merged[key] = list(value)
+            elif value is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = value
+        
+        q_string = urlencode(merged, doseq=True, safe=":/")
+        return self._replace(query=q_string)
+
+    def without_query(self) -> "WebPath":
+        return self._replace(query="")
+
+    def with_fragment(self, tag: str) -> "WebPath":
+        return self._replace(fragment=quote(tag))
+
+    def __getattr__(self, item: str):
+        if item in _HTTP_VERBS:
+            return functools.partial(http_request, item, self)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{item}'")
+
+    def with_cache(self, ttl: int = 300, cache_dir: Optional[Path] = None) -> "WebPath":
+        new_path = WebPath(self._url)
+        new_path._cache_config = CacheConfig(ttl, cache_dir)
+        return new_path
+    
+    def with_logging(self, enabled: bool = True) -> "WebPath":
+        new_path = WebPath(self._url)
+        new_path._cache_config = self._cache_config
+        new_path._allow_auto_follow = self._allow_auto_follow
+        new_path._enable_logging = enabled
+        return new_path
+
+    def session(self, **kw):
+        return session_cm(self, **kw)
+
+    async def aget(self, *a, **kw):
+        return await aget_async(self, *a, **kw)
+
+    def download(self, dest, **kw):
+        return download_file(self, dest, **kw)
+
+    def _replace(self, **patch) -> "WebPath":
+        data = self._parts._asdict() | patch
+        url = urlunsplit(tuple(data[k] for k in ("scheme", "netloc", "path", "query", "fragment")))
+        if self._trailing_slash and not url.endswith("/"):
+            url += "/"
+        return WebPath(url)
+
+    def __iter__(self):
+        return iter(self._parts.path.strip("/").split("/"))
+========================================
+File: ./tests/test_retry.py
+========================================
+import requests_mock
+from webpath import WebPath
+from urllib.parse import urlparse
+import sys
+import types
+
+def test_retries():
+    target = WebPath("https://example.org/res")
+
+    with requests_mock.Mocker() as m:
+        # first two calls fail, third returns 200
+        m.get("https://example.org/res", [
+            {'status_code': 503},
+            {'status_code': 503},
+            {'status_code': 200, 'text': 'ok'},
+        ])
+        r = target.get(retries=3, backoff=0)   # no sleep in tests
+        assert r.status_code == 200
+        assert r.text == "ok"
+        assert m.call_count == 3
+
+def test_download_without_tqdm(tmp_path, monkeypatch):
+    # pretend tqdm is missing
+    monkeypatch.setitem(sys.modules, "tqdm", types.ModuleType("tqdm_missing"))
+    data = b"x"*100
+    target = tmp_path / "x.bin"
+    with requests_mock.Mocker() as m:
+        m.get("https://y/z", content=data, headers={"content-length": "100"})
+        WebPath("https://y/z").download(target, progress=True)
+    assert target.stat().st_size == 100
+
+
+def test_session_reuse():
+    url = WebPath("https://api.ex/x")
+    with requests_mock.Mocker() as m:
+        m.get("https://api.ex/x", text="foo")
+        m.post("https://api.ex/x", text="bar")
+        with url.session() as call:
+            r1 = call("get")
+            r2 = call("post")
+    assert r1.text == "foo" and r2.text == "bar"
+
+========================================
+File: ./tests/test_thread_safety.py
+========================================
+
+import threading
+from webpath.core import _idna
+
+def test_idna_cache_thread_safety():
+    domains = [f"test{i}.bücher.de" for i in range(100)]
+    results = {}
+    errors = []
+    
+    def worker(domain):
+        try:
+            result = _idna(domain)
+            results[domain] = result
+        except Exception as e:
+            errors.append(e)
+    
+    threads = []
+    for domain in domains:
+        t = threading.Thread(target=worker, args=(domain,))
+        threads.append(t)
+        t.start()
+    
+    for t in threads:
+        t.join()
+    
+    assert len(errors) == 0
+    assert len(results) == 100
+    for domain, result in results.items():
+        assert result.startswith("test") and "xn--" in result
+
+def test_idna_cache_size_limit():
+    from webpath.core import _IDNA_CACHE, _IDNA_CACHE_MAX_SIZE
+    
+    _IDNA_CACHE.clear()
+    
+    for i in range(_IDNA_CACHE_MAX_SIZE + 100):
+        _idna(f"domain{i}.example.com")
+    
+    assert len(_IDNA_CACHE) <= _IDNA_CACHE_MAX_SIZE
+========================================
+File: ./tests/test_validation.py
+========================================
+
+from webpath import WebPath
+import pytest
+
+def test_webpath_requires_scheme():
+    with pytest.raises(ValueError, match="must include scheme"):
+        WebPath("example.com/path")
+
+def test_webpath_rejects_non_http_schemes():
+    with pytest.raises(ValueError, match="Only http/https schemes supported"):
+        WebPath("ftp://example.com/file")
+    
+    with pytest.raises(ValueError, match="Only http/https schemes supported"):
+        WebPath("file:///etc/passwd")
+
+def test_webpath_requires_hostname():
+    with pytest.raises(ValueError, match="must include hostname"):
+        WebPath("https:///path/only")
+
+def test_webpath_empty_url():
+    with pytest.raises(ValueError, match="cannot be empty"):
+        WebPath("")
+    
+    with pytest.raises(ValueError, match="cannot be empty"):
+        WebPath("   ")

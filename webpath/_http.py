@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-from typing import Any
 from urllib.parse import urlparse
 import requests
 from requests.adapters import HTTPAdapter
@@ -9,18 +8,18 @@ from urllib3.util.retry import Retry
 import contextvars
 import atexit
 import httpx
-from typing import Type, TypeVar, Any
 from pydantic import TypeAdapter, ValidationError
-import warnings, os
+import warnings
 from urllib.parse import urlsplit
 import json
+import jmespath
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.panel import Panel
 from rich import box
+from webpath.core import WebPath
 
-T = TypeVar("T")
 _client_cv = contextvars.ContextVar("webpath_client", default=None)
 
 _HTTP_VERBS = ("get", "post", "put", "patch", "delete", "head", "options")
@@ -50,8 +49,8 @@ class WebResponse:
     def __getattr__(self, name):
         return getattr(self._response, name)
     
-    def find(self, path: str, default=None):
-        if not path:
+    def find(self, expression: str, default=None):
+        if not expression:
             return default
         
         data = self.json_data
@@ -59,41 +58,16 @@ class WebResponse:
             return default
         
         try:
-            parts = self._parse_path(path)
-            current = data
-            
-            for part in parts:
-                if isinstance(current, dict):
-                    if isinstance(part, int):
-                        part = str(part)
-                    current = current[part]
-                elif isinstance(current, list):
-                    if isinstance(part, str):
-                        if part.isdigit():
-                            part = int(part)
-                        else:
-                            return default
-                    current = current[part]
-                else:
-                    return default
-                    
-            return current
-            
-        except (KeyError, IndexError, TypeError, ValueError):
+            result = jmespath.search(expression, data)
+            return result if result is not None else default
+        except (jmespath.exceptions.JMESPathError, ValueError):
             return default
 
-    def find_all(self, pattern: str):
-        if not pattern:
-            return []
-        
-        data = self.json_data
-        if not data:
-            return []
-        
-        parts = self._parse_path(pattern)
-        return self._find_recursive([data], parts, 0)
+    def find_all(self, expression: str):
+        result = self.find(expression, default=[])
+        return result if isinstance(result, list) else [result] if result else []
 
-    def search(self, key: str, case_sensitive: bool = False):
+    def search(self, key, case_sensitive=False):
         if not key:
             return []
         
@@ -104,68 +78,22 @@ class WebResponse:
         search_key = key if case_sensitive else key.lower()
         return self._search_recursive(data, search_key, case_sensitive)
 
-    def extract(self, *paths, flatten: bool = False): # pragma: no skylos
+    def extract(self, *expressions, flatten=False):
         results = []
-        for path in paths:
-            if '*' in path:
-                values = self.find_all(path)
+        for expr in expressions:
+            if '*' in expr or '[' in expr:
+                values = self.find_all(expr)
                 if flatten:
                     results.extend(values)
                 else:
                     results.append(values)
             else:
-                results.append(self.find(path))
+                results.append(self.find(expr))
         
         return tuple(results) if len(results) > 1 else results[0] if results else None
 
-    def has_path(self, path: str) -> bool:
-        return self.find(path, default=object()) is not object()
-
-    def _parse_path(self, path: str):
-        if not path:
-            return []
-        
-        parts = []
-        for part in path.split('.'):
-            if part.isdigit():
-                parts.append(int(part))
-            else:
-                parts.append(part)
-        return parts
-
-    def _find_recursive(self, current_items, parts, part_index):
-        if part_index >= len(parts):
-            return current_items
-        
-        current_part = parts[part_index]
-        next_items = []
-        
-        for item in current_items:
-            if current_part == '*':
-                # wildcard .. collect all items
-                if isinstance(item, dict):
-                    next_items.extend(item.values())
-                elif isinstance(item, list):
-                    next_items.extend(item)
-            else:
-                try:
-                    if isinstance(item, dict):
-                        if isinstance(current_part, int):
-                            current_part = str(current_part)
-                        if current_part in item:
-                            next_items.append(item[current_part])
-                    elif isinstance(item, list):
-                        if isinstance(current_part, str) and current_part.isdigit():
-                            current_part = int(current_part)
-                        if isinstance(current_part, int) and 0 <= current_part < len(item):
-                            next_items.append(item[current_part])
-                except (KeyError, IndexError, TypeError):
-                    continue
-        
-        if part_index == len(parts) - 1:
-            return next_items
-        else:
-            return self._find_recursive(next_items, parts, part_index + 1)
+    def has_path(self, expression: str) -> bool:
+        return self.find(expression, default=object()) is not object()
 
     def _search_recursive(self, obj, search_key, case_sensitive):
         results = []
@@ -194,8 +122,8 @@ class WebResponse:
 
     def get_pagination_info(self):
         return {
-            'next': self.find("next") or self.find("next_url") or self.find("pagination.next"),
-            'prev': self.find("prev") or self.find("prev_url") or self.find("pagination.prev"),
+            'next': self.find("next") or self.find("next_url") or self.find("pagination.next") or self.find("links.next"),
+            'prev': self.find("prev") or self.find("prev_url") or self.find("pagination.prev") or self.find("links.prev"), 
             'total': self.find("total") or self.find("count") or self.find("pagination.total"),
             'page': self.find("page") or self.find("pagination.page"),
             'per_page': self.find("per_page") or self.find("limit") or self.find("pagination.per_page")
@@ -213,24 +141,20 @@ class WebResponse:
     def json(self):
         return self._response.json()
     
-    def parse(self, model: Type[T] | None = None, *, strict: bool | None = None) -> T | Any:
+    def parse(self, model=None, strict=False):
         data = self.json()
-
         if model is None:
             return data
-
-        strict = strict if strict is not None else os.getenv("WEBPATH_VALIDATION") == "strict"
-
+        
         try:
             return TypeAdapter(model).validate_python(data)
         except ValidationError as exc:
             if strict:
                 raise
-            warnings.warn(f"Validation failed – returning raw data: {exc}")
+            warnings.warn(f"Validation failed - returning raw data: {exc}")
             return data
         
     def __truediv__(self, key):
-        from .core import WebPath
         data = self.json_data
         
         if isinstance(data, dict) and key in data:
@@ -266,7 +190,7 @@ class WebResponse:
     
     def __contains__(self, key):
         data = self.json_data
-        return key in data if isinstance(data, dict) else False
+        return isinstance(data, dict) and key in data
     
     def get(self, key, default=None):
         data = self.json_data
@@ -297,7 +221,7 @@ class WebResponse:
         
         size_text = f"{len(self.content):,} bytes"
         
-        status_info = f"{status_text} • {time_text} • {size_text}"
+        status_info = f"{status_text} * {time_text} * {size_text}"
         console.print(Panel(status_info, title="Response", border_style="blue"))
         
         self._print_response_body(console)
@@ -313,14 +237,18 @@ class WebResponse:
                 syntax = Syntax(json_text, "json", theme="monokai", line_numbers=False)
                 console.print(Panel(syntax, title="Response Body", border_style="green"))
             except:
-                console.print(Panel(self.text[:1000] + "..." if len(self.text) > 1000 else self.text, 
-                                title="Response Body", border_style="yellow"))
+                text = self.text[:1000]
+                if len(self.text) > 1000:
+                    text += "..."
+                console.print(Panel(text, title="Response Body", border_style="yellow"))
         elif 'text' in content_type or 'html' in content_type:
-            preview = self.text[:500] + "..." if len(self.text) > 500 else self.text
-            console.print(Panel(preview, title="Response Body", border_style="green"))
+            text = self.text[:500]
+            if len(self.text) > 500:
+                text += "..."
+            console.print(Panel(text, title="Response Body", border_style="green"))
         else:
             console.print(Panel(f"Binary content ({len(self.content)} bytes)", 
-                            title="Response Body", border_style="yellow"))
+                                title="Response Body", border_style="yellow"))
 
     def _print_headers(self, console):
         table = Table(show_header=True, header_style="bold blue", box=box.SIMPLE)
@@ -373,7 +301,7 @@ class WebResponse:
                 break
                 
             try:
-                from .core import WebPath
+                from webpath.core import WebPath
                 current_page = WebPath(next_url).get()
             except Exception:
                 break
@@ -446,10 +374,11 @@ class WebResponse:
                     all_items.append(items)
         return all_items
 
-def _build_retry_adapter(retries: int, backoff: float) -> HTTPAdapter:
+def _build_retry_adapter(retries, backoff, jitter=0.0):
     retry_cfg = Retry(
         total=retries,
         backoff_factor=backoff,
+        backoff_jitter=jitter,
         status_forcelist=(502, 503, 504),
         allowed_methods=[v.upper() for v in _HTTP_VERBS],
         raise_on_redirect=False,
@@ -457,7 +386,7 @@ def _build_retry_adapter(retries: int, backoff: float) -> HTTPAdapter:
     )
     return HTTPAdapter(max_retries=retry_cfg)
 
-def http_request(verb: str, url, *a: Any, retries: int | None = None, backoff: float = 0.3, **kw: Any):
+def http_request(verb, url, *a, retries=None, backoff=0.3, jitter=0.0, session=None, **kw):
     cache_config = None
     if hasattr(url, '_cache_config'):
         cache_config = url._cache_config
@@ -478,17 +407,15 @@ def http_request(verb: str, url, *a: Any, retries: int | None = None, backoff: f
             return WebResponse(CachedResponse(cached), url)
 
     try:
-        if retries:
-            adapter = _build_retry_adapter(retries, backoff)
+        if session:
+            resp = getattr(session, verb)(str(url), *a, **kw)
+        elif retries:
+            adapter = _build_retry_adapter(retries, backoff, jitter)
             with requests.Session() as sess:
                 sess.mount("http://", adapter)
                 sess.mount("https://", adapter)
                 func = getattr(sess, verb)
                 resp = func(str(url), *a, **kw)
-                for _ in range(retries - 1):
-                    if resp.status_code not in (502, 503, 504):
-                        break
-                    resp = func(str(url), *a, **kw)
         else:
             resp = getattr(requests, verb)(str(url), *a, **kw)
             
@@ -512,12 +439,20 @@ def http_request(verb: str, url, *a: Any, retries: int | None = None, backoff: f
             time.sleep(min_interval - elapsed)
         url._last_request_time = time.time()
 
-
-    if hasattr(url, '_enable_logging') and url._enable_logging:
+    if getattr(url, '_enable_logging', False):
         console = Console()
-        elapsed = getattr(resp, 'elapsed', None)
-        elapsed_ms = int(elapsed.total_seconds() * 1000) if elapsed else 0
-        status_color = "green" if 200 <= resp.status_code < 300 else "red" if resp.status_code >= 400 else "yellow"
+        
+        elapsed_ms = 0
+        if resp.elapsed:
+            elapsed_ms = int(resp.elapsed.total_seconds() * 1000)
+        
+        if 200 <= resp.status_code < 300:
+            status_color = "green"
+        elif resp.status_code >= 400:
+            status_color = "red"
+        else:
+            status_color = "yellow"
+        
         console.print(f"{verb.upper()} {url_str} → [{status_color}]{resp.status_code}[/{status_color}] ({elapsed_ms}ms)")
 
     return WebResponse(resp, url)

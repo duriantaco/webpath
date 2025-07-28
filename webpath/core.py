@@ -1,33 +1,17 @@
 from __future__ import annotations
-import requests
-import threading
-from collections import OrderedDict
+import httpx
 from urllib.parse import quote, urlencode, urlunsplit, parse_qsl, urlsplit
-from webpath._http import http_request, session_cm, aget_async
+from webpath._http import _sync_http_request, _async_http_request
 from webpath.downloads import download_file
 from webpath.cache import CacheConfig
 
-_IDNA_CACHE: OrderedDict[str, str] = OrderedDict()
-_IDNA_CACHE_LOCK = threading.RLock()
-_IDNA_CACHE_MAX_SIZE = 1000
 _HTTP_VERBS = ("get", "post", "put", "patch", "delete", "head", "options")
 
-def _idna(netloc: str):
-    with _IDNA_CACHE_LOCK:
-        if netloc in _IDNA_CACHE:
-            _IDNA_CACHE.move_to_end(netloc)
-            return _IDNA_CACHE[netloc]
-        
-        try:
-            ascii_netloc = netloc.encode("idna").decode("ascii")
-        except UnicodeError:
-            ascii_netloc = netloc
-        
-        if len(_IDNA_CACHE) >= _IDNA_CACHE_MAX_SIZE:
-            _IDNA_CACHE.popitem(last=False)
-        
-        _IDNA_CACHE[netloc] = ascii_netloc
-        return ascii_netloc
+def _idna(netloc):
+    try:
+        return netloc.encode("idna").decode("ascii")
+    except UnicodeError:
+        return netloc
 
 class Client:
     
@@ -48,15 +32,22 @@ class Client:
     ):
         self.base_url = WebPath(base_url)
         
-        self.session = requests.Session()
-        if headers:
-            self.session.headers.update(headers)
+        transport = httpx.HTTPTransport(retries=(retries or 0))
+        async_transport = httpx.AsyncHTTPTransport(retries=(retries or 0))
         
-        if retries:
-            from webpath._http import _build_retry_adapter
-            adapter = _build_retry_adapter(retries, backoff or 0.3, jitter or 0.0)
-            self.session.mount("http://", adapter)
-            self.session.mount("https://", adapter)
+        self.sync_client = httpx.Client(
+            headers=headers or {},
+            timeout=timeout,
+            transport=transport,
+            follow_redirects=auto_follow
+        )
+        
+        self.async_client = httpx.AsyncClient(
+            headers=headers or {},
+            timeout=timeout,
+            transport=async_transport,
+            follow_redirects=auto_follow
+        )
         
         self._config = {
             "headers": headers or {},
@@ -69,7 +60,8 @@ class Client:
             "enable_logging": enable_logging,
             "auto_follow": auto_follow,
             "timeout": timeout,
-            "session": self.session
+            "sync_client": self.sync_client,
+            "async_client": self.async_client
         }
     
     def path(self, *segments):
@@ -97,33 +89,29 @@ class Client:
     def delete(self, *segments, **kwargs):
         return self.path(*segments).delete(**kwargs)
     
+    async def aget(self, *segments, **params):
+        return await self.path(*segments).with_query(**params).aget()
+    
+    async def apost(self, *segments, **kwargs):
+        return await self.path(*segments).apost(**kwargs)
+    
+    async def aput(self, *segments, **kwargs):
+        return await self.path(*segments).aput(**kwargs)
+    
+    async def apatch(self, *segments, **kwargs):
+        return await self.path(*segments).apatch(**kwargs)
+    
+    async def adelete(self, *segments, **kwargs):
+        return await self.path(*segments).adelete(**kwargs)
+    
     def session_cm(self, **kw):
         return self.base_url.apply_config(self._config).session(**kw)
     
     def with_config(self, **updates):
         new_config = self._config.copy()
-        
-        if "headers" in updates:
-            new_config["headers"] = {**new_config.get("headers", {}), **updates.pop("headers")}
-        
         new_config.update(updates)
         
-        new_client = Client(
-            str(self.base_url),
-            headers=new_config.get("headers"),
-            cache_ttl=new_config.get("cache_ttl"),
-            cache_dir=new_config.get("cache_dir"),
-            retries=new_config.get("retries"),
-            backoff=new_config.get("backoff"),
-            jitter=new_config.get("jitter"),
-            rate_limit=new_config.get("rate_limit"),
-            enable_logging=new_config.get("enable_logging", False),
-            auto_follow=new_config.get("auto_follow", False),
-            timeout=new_config.get("timeout")
-        )
-        
-        new_client.session.cookies.update(self.session.cookies)
-        
+        new_client = Client(str(self.base_url), **new_config)
         return new_client
     
     def __enter__(self):
@@ -132,32 +120,30 @@ class Client:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
     
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.aclose()
+    
     def close(self):
-        if self.session:
-            self.session.close()
+        if self.sync_client:
+            self.sync_client.close()
+    
+    async def aclose(self):
+        if self.async_client:
+            await self.async_client.aclose()
 
 class WebPath:
     __slots__ = (
-        "_url", "_parts", "_trailing_slash", "_cache", "_cache_config", 
-        "_allow_auto_follow", "_enable_logging", "_rate_limit", "_last_request_time",
-        "_default_headers", "_retries", "_backoff", "_jitter", "_timeout", "_session"
-    )
-    
+        "_url", "_parts", "_cache", "_cache_config", "_headers", "_client",
+        "_trailing_slash", "_allow_auto_follow", "_enable_logging", "_rate_limit",
+        "_last_request_time", "_default_headers", "_retries", "_backoff", 
+        "_jitter", "_timeout", "_sync_client", "_async_client"
+    )    
     def __init__(self, url):
-        self._url = str(url).strip()
-        
-        if not self._url:
-            raise ValueError("URL cannot be empty")
-        
+        self._url = str(url)
         self._parts = urlsplit(self._url)
-        
-        if not self._parts.scheme:
-            raise ValueError(f"URL must include scheme (http/https): {self._url}")
-        if self._parts.scheme not in ('http', 'https'):
-            raise ValueError(f"Only http/https schemes supported: {self._parts.scheme}")
-        if not self._parts.netloc:
-            raise ValueError(f"URL must include hostname: {self._url}")
-        
         self._trailing_slash = self._url.endswith("/") and not self._parts.path.endswith("/")
         self._cache = {}
         self._cache_config = None
@@ -170,7 +156,8 @@ class WebPath:
         self._backoff = 0.3
         self._jitter = 0.0
         self._timeout = None
-        self._session = None
+        self._sync_client = None
+        self._async_client = None
 
     def __str__(self):
         return self._url
@@ -279,47 +266,45 @@ class WebPath:
 
     def apply_config(self, config):
         updates = {}
-        
-        if config.get("headers"):
-            new_headers = self._default_headers.copy()
-            new_headers.update(config["headers"])
-            updates["_default_headers"] = new_headers
-        
+        if "headers" in config:
+            updates["_default_headers"] = config["headers"]
         if "cache_ttl" in config:
             updates["_cache_config"] = CacheConfig(config["cache_ttl"], config.get("cache_dir"))
-        
-        if "session" in config:
-            updates["_session"] = config["session"]
-        
-        for attr, key in [
-            ("_retries", "retries"), ("_backoff", "backoff"), ("_jitter", "jitter"),
-            ("_rate_limit", "rate_limit"), ("_enable_logging", "enable_logging"),
-            ("_timeout", "timeout")
-        ]:
-            if key in config:
-                updates[attr] = config[key]
-        
-        if "auto_follow" in config:
-            updates["_allow_auto_follow"] = config["auto_follow"]
+        if "sync_client" in config:
+            updates["_sync_client"] = config["sync_client"]
+        if "async_client" in config:
+            updates["_async_client"] = config["async_client"]
         
         return self._clone(**updates)
 
     def __getattr__(self, item):
-        if item in _HTTP_VERBS:
-            def request_method(*args, **kwargs):
+        if item.startswith('a') and item[1:] in _HTTP_VERBS:
+            verb = item[1:]
+            async def async_request_method(*args, **kwargs):
                 kwargs.setdefault("retries", self._retries)
-                kwargs.setdefault("backoff", self._backoff)
-                kwargs.setdefault("jitter", self._jitter)
                 kwargs.setdefault("timeout", self._timeout)
-                
-                kwargs["session"] = self._session
+                kwargs["client"] = self._async_client
                 
                 headers = {**self._default_headers, **kwargs.get("headers", {})}
                 if headers:
                     kwargs["headers"] = headers
                 
-                return http_request(item, self, *args, **kwargs)
-            return request_method
+                return await _async_http_request(verb, self, *args, **kwargs)
+            return async_request_method
+        
+        if item in _HTTP_VERBS:
+            def sync_request_method(*args, **kwargs):
+                kwargs.setdefault("retries", self._retries)
+                kwargs.setdefault("timeout", self._timeout)
+                kwargs["client"] = self._sync_client
+                
+                headers = {**self._default_headers, **kwargs.get("headers", {})}
+                if headers:
+                    kwargs["headers"] = headers
+                
+                return _sync_http_request(item, self, *args, **kwargs)
+            return sync_request_method
+        
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{item}'")
 
     def with_cache(self, ttl=300, cache_dir=None):     # pragma: no skylos
@@ -334,15 +319,11 @@ class WebPath:
     def _clone(self, **updates):
         new_path = WebPath(self._url)
         for attr in self.__slots__:
-            if attr not in ('_url', '_parts', '_trailing_slash', '_cache'):
-                value = getattr(self, attr)
-                if hasattr(value, 'copy'):
-                    value = value.copy()
-                setattr(new_path, attr, value)
+            if attr not in ('_url', '_parts'):
+                setattr(new_path, attr, getattr(self, attr))
         
         for key, value in updates.items():
             setattr(new_path, key, value)
-        
         return new_path
 
     def with_headers(self, **headers):
@@ -353,21 +334,8 @@ class WebPath:
     def with_retries(self, retries, backoff=0.3, jitter=0.0):
         return self._clone(_retries=retries, _backoff=backoff, _jitter=jitter)
     
-    def session(self, **kw):     # pragma: no skylos
-        return session_cm(self, **kw)
-
-    async def aget(self, *a, **kw):    # pragma: no skylos
-        headers = self._default_headers.copy()
-        if "headers" in kw:
-            headers.update(kw["headers"])
-            kw["headers"] = headers
-        elif headers:
-            kw["headers"] = headers
-        
-        if self._timeout is not None and "timeout" not in kw:
-            kw["timeout"] = self._timeout
-        
-        return await aget_async(self, *a, **kw)
+    def session(self, **kw):
+        return httpx.Client(**kw)
 
     def download(self, dest, **kw):
         if self._retries is not None and "retries" not in kw:
@@ -386,4 +354,4 @@ class WebPath:
         return self._clone(_url=url, _parts=urlsplit(url))
 
     def __iter__(self):
-        return iter(self._parts.path.strip("/").split("/")) 
+        return iter(self._parts.path.strip("/").split("/"))

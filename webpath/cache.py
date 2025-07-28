@@ -1,26 +1,24 @@
 from __future__ import annotations
-
-from typing import Optional
 import hashlib
 import json
 import time
 from pathlib import Path
 
 class CacheConfig:
-    def __init__(self, ttl: int = 300, cache_dir: Optional[Path] = None):
+    def __init__(self, ttl = 300, cache_dir = None):
         self.ttl = ttl
         self.cache_dir = cache_dir or Path.home() / ".webpath" / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
     
-    def _cache_key(self, verb: str, url: str) -> str:
+    def _cache_key(self, verb, url):
         key_str = f"{verb.upper()}:{url}"
         return hashlib.md5(key_str.encode()).hexdigest()
     
-    def _cache_path(self, verb: str, url: str) -> Path:
+    def _cache_path(self, verb, url):
         key = self._cache_key(verb, url)
         return self.cache_dir / f"{key}.json"
     
-    def get(self, verb: str, url: str) -> Optional[dict]:
+    def get(self, verb, url):
         cache_path = self._cache_path(verb, url)
         if not cache_path.exists():
             return None
@@ -38,17 +36,17 @@ class CacheConfig:
             cache_path.unlink(missing_ok=True)
             return None
     
-    def set(self, verb: str, url: str, response) -> None:
+    def set(self, verb, url, response):
         cache_path = self._cache_path(verb, url)
         
         sensitive_headers = {
             'authorization', 'cookie', 'x-api-key', 'x-auth-token', 
             'authentication', 'proxy-authorization'
         }
-        safe_headers = {
-            k: v for k, v in response.headers.items() 
-            if k.lower() not in sensitive_headers
-        }
+        safe_headers = {}
+        for k, v in response.headers.items():
+            if k.lower() not in sensitive_headers:
+                safe_headers[k] = v
         
         cached = {
             'timestamp': time.time(),

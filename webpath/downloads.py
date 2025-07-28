@@ -1,23 +1,19 @@
 from __future__ import annotations
-
 import hashlib
-import importlib
-import os
 from pathlib import Path
-from typing import Optional
-
+from tqdm import tqdm
 from webpath._http import http_request
 
 def download_file(
     url,
-    dest: str | os.PathLike,
+    dest,
     *,
-    chunk: int = 8192,
-    progress: bool = True,
-    retries: int = 3,
-    backoff: float = 0.3,
-    checksum: Optional[str] = None,
-    algorithm: str = "sha256",
+    chunk = 8192,
+    progress= True,
+    retries = 3,
+    backoff = 0.3,
+    checksum = None,
+    algorithm = "sha256",
     **req_kw,
 ):
     dest = Path(dest)
@@ -32,10 +28,8 @@ def download_file(
 
         if progress:
             try:
-                mod = importlib.import_module("tqdm")
-                if hasattr(mod, "tqdm"):
-                    bar = mod.tqdm(total=total, unit="B", unit_scale=True, leave=False)
-            except ModuleNotFoundError:
+                bar = tqdm(total=total, unit="B", unit_scale=True, leave=False)
+            except ImportError:
                 pass
 
         with dest.open("wb") as fh:

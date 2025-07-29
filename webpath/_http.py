@@ -11,7 +11,6 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.panel import Panel
 from rich import box
-from webpath.core import WebPath
 import asyncio
 
 # _HTTP_VERBS = ("get", "post", "put", "patch", "delete", "head", "options")
@@ -43,14 +42,29 @@ class WebResponse:
     
     def find(self, expression, default=None):
         data = self.json_data
-        result = jmespath.search(expression, data)
-        return result if result is not None else default
+        
+        if ' || ' in expression:
+            expressions = [expr.strip() for expr in expression.split(' || ')]
+            for expr in expressions:
+                result = jmespath.search(expr, data)
+                if result is not None:
+                    return result
+            return default
+        else:
+            result = jmespath.search(expression, data)
+            return result if result is not None else default
 
     def find_all(self, expression):
         result = self.find(expression, default=[])
         return result if isinstance(result, list) else [result] if result else []
 
     def extract(self, *expressions, flatten=False):
+        if len(expressions) == 1:
+            result = self.find(expressions[0])
+            if flatten and isinstance(result, list):
+                return result
+            return result
+        
         results = []
         for expr in expressions:
             result = self.find(expr)
@@ -59,10 +73,12 @@ class WebResponse:
             else:
                 results.append(result)
         
-        return tuple(results) if len(results) > 1 else results[0] if results else None
+        return tuple(results)
 
     def has_path(self, expression):
-        return self.find(expression, default=object()) is not object()
+        sentinel = object()
+        result = self.find(expression, default=sentinel)
+        return result is not sentinel
 
     def get_errors(self):
         return self.find("error || message")
@@ -72,11 +88,11 @@ class WebResponse:
 
     def get_pagination_info(self):
         return {
-            'next': self.find("next || next_url"),
-            'prev': self.find("prev || prev_url"), 
-            'total': self.find("total || count"),
-            'page': self.find("page"),
-            'per_page': self.find("per_page || limit")
+            'next': self.find("next || next_url || pagination.next"),
+            'prev': self.find("prev || prev_url || pagination.prev"), 
+            'total': self.find("total || count || pagination.total"),
+            'page': self.find("page || pagination.page"),
+            'per_page': self.find("per_page || limit || pagination.per_page || pagination.limit")
         }
     
     @property
@@ -107,12 +123,14 @@ class WebResponse:
         if isinstance(data, dict):
             value = data[key]
             if isinstance(value, str) and value.startswith(('http://', 'https://')):
+                from webpath.core import WebPath
                 return WebPath(value).get()
             return value
         elif isinstance(data, list):
             idx = int(key)
             value = data[idx]
             if isinstance(value, str) and value.startswith(('http://', 'https://')):
+                from webpath.core import WebPath
                 return WebPath(value).get()
             return value
     
@@ -227,7 +245,8 @@ class WebResponse:
                 
             if not next_url:
                 break
-                
+            
+            from webpath.core import WebPath
             current_page = WebPath(next_url).get()
 
     def paginate_all(self, max_pages=100, next_key=None, data_key=None):
@@ -382,3 +401,9 @@ def _get_helpful_error_message(response, url):
         return f"Server error: {hostname}"
     
     return f"HTTP {status} from {hostname}"
+
+def http_request(verb, url, *args, **kwargs):
+    return _sync_http_request(verb, url, *args, **kwargs)
+
+async def async_http_request(verb, url, *args, **kwargs):
+    return await _async_http_request(verb, url, *args, **kwargs)

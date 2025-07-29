@@ -2,11 +2,13 @@ import requests_mock, hashlib
 from webpath import WebPath
 import pytest
 import requests_mock
+import tempfile
+from pathlib import Path
 
 def test_download(tmp_path):
-    data      = b"x" * 1024
+    data = b"x" * 1024
     checksum  = hashlib.sha256(data).hexdigest()
-    dest      = tmp_path / "x.bin"
+    dest = tmp_path / "x.bin"
 
     with requests_mock.Mocker() as m:
         m.register_uri("GET", "https://d.com/x", content=data, headers={"content-length": "1024"})
@@ -16,8 +18,7 @@ def test_download(tmp_path):
 
 def test_download_bad_checksum(tmp_path):
     data = b"abcdef"
-    good = hashlib.sha256(data).hexdigest()
-    bad  = "deadbeef" * 8
+    bad = "deadbeef" * 8
     path = tmp_path / "d.bin"
 
     with requests_mock.Mocker() as m:
@@ -27,8 +28,7 @@ def test_download_bad_checksum(tmp_path):
     assert not path.exists()
 
 def test_cache_excludes_sensitive_headers():
-    import tempfile
-    from pathlib import Path
+
     
     with tempfile.TemporaryDirectory() as tmpdir:
         cache_dir = Path(tmpdir)

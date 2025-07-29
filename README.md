@@ -1,340 +1,188 @@
-# Webpath
+# WebPath
 
 ![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 ![100% Local](https://img.shields.io/badge/privacy-100%25%20local-brightgreen)
 ![Security Policy](https://img.shields.io/badge/security-policy-brightgreen)
-![Skylos Check](https://img.shields.io/badge/Dead_Code-Free-brightgreen?logo=moleculer&logoColor=white)
 
-HTTP library that makes APIs actually enjoyable to work with
+A Python HTTP client library that makes interacting with APIs with lesser boilerplate. Built on `httpx` and `jmespath`.
 
-* **JSON shortcuts** - `find()`, `find_all()`, `extract()` with dot notation
-* **Request logging** - Auto request/response logging
-* **Caching** - Filters some sensitive headers automatically
-* **Pagination** - Cycle detection and next page finding
-* **Rate Limiting** - Auto-throttle requests
+* **`Client` Interface**: Manage sessions, headers, and retries centrally
+* **JSON Traversal**: Use `jmespath` expressions to find whatever you need
+* **Async**: `async` and `await` support
+* **Caching & Retries**: Features with simple controls
+* **Path-like URL Building**: Construct URLs with a clean, intuitive `/` operator.
 
-## Why webpath?
+---
 
-**vs requests/httpx:**
-- Manual JSON navigation: `resp.json()["data"]["users"][0]["name"]`
-- Intuitive shortcuts: `resp.find("data.users.0.name")`
+## The `webpath` Workflow
 
-**vs other URL builders:**
-- No HTTP client integration
-- Easier URL building + requests + JSON processing
+`webpath` tries to integrate the lifecycle of an API request. Eg, from building the URL to processing the response.
 
-**vs debugging tools:**
-- Separate tools for logging/inspection
-- Built-in logging, response inspection, cURL generation
+**Without `webpath`**, you manually wire together multiple libraries and steps as shown in the example below:
 
-## Installation
+```python
+import httpx
+import jmespath
 
-```bash
-# core features
+# step 1 manual configuration
+transport = httpx.HTTPTransport(retries=3)
+client = httpx.Client(
+    base_url="[https://api.github.com](https://api.github.com)",
+    headers={"Accept": "application/vnd.github.v3+json"},
+    transport=transport
+)
+
+# step 2 build the url
+url = "/repos/python/cpython"
+
+# step 3 make the request
+response = client.get(url)
+response.raise_for_status()
+data = response.json()
+
+description = jmespath.search("description", data)
+print(description)
+```
+
+# Installation
+
+# Core features (includes httpx and jmespath)
 pip install webpath
 
-# async helpers (adds httpx)
-pip install "webpath[async]"
-
-# progress bar downloads (adds tqdm)
+# For progress bar on downloads
 pip install "webpath[progress]"
 
-```
-
-## Quick Start
-
-### Python API
-
-#### 1. Build URLs like pathlib.Path
-
+# Quick Start
 ```python
-base  = WebPath("https://api.example.com/v1")
-user  = base / "users" / 42
-print(user) # https://api.example.com/v1/users/42
-```
-
-#### 2. Add query params
-```python
-detail = user.with_query(fields=["name", "email"])
-print(detail) 
-# …/42?fields=name&fields=email
-```
-
-#### 3. One liner GET
-```python
-resp = detail.get(timeout=5).json()
-print(resp["name"])
-```
-
-#### 4. Auto retries + back off
-```python
-html = WebPath("https://httpbin.org/status/503").get(retries=3, backoff=0.5).text
-```
-
-#### 5. Reuse a single session
-```python
-with detail.session() as call:
-    a = call("get").json()
-    b = call("post", json={"hello": "world"}).json()
-```
-
-#### 6. Async request (requires webpath[async])
-```python
+from webpath.core import Client
 import asyncio
 
-async def main():
-    data = await detail.aget(timeout=5)
-    print(data.json())
-
-asyncio.run(main())
-```
-
-#### 7. Download with progress + checksum
-```python
-url  = WebPath("https://speed.hetzner.de/100MB.bin")
-path = url.download("100MB.bin", progress=True,
-                    checksum="5be551ef1ce3…")
-print("saved to", path)
-
-```
-
-#### 8. Respect API rate limits
-
-```python
-api = WebPath("https://api.github.com").with_rate_limit(2.0)  # 2 requests/sec
-for user in ["octocat", "torvalds"]:
-    resp = api / "users" / user  # auto waits between calls
-    print(f"{resp.get().json()['name']}")
-```
-
-#### 9. Debug requests in real-time
-```python
-api = WebPath("https://api.github.com").with_logging()
-resp = (api / "users" / "octocat").get()
-
-# deep dive into the response
-resp.inspect()
-```
-
-#### **NOTE**: 
-
-- `with_logging()` = see timing for every request (example 9)
-- `inspect()` = deep dive into a specific response (example 9)
-
-#### Inspect 
-
-### CLI Usage
-
-#### Join path segments
-```bash
-webpath join https://api.example.com/v1 users 42
-#### https://api.example.com/v1/users/42
-```
-
-#### simple GET (stdout)
-```bash
-webpath get https://api.github.com/repos/python/cpython -p | jq '.stargazers_count'
-```
-
-#### GET with retry/back off
-```bash
-webpath get https://httpbin.org/status/503 --retries 3 --backoff 0.5
-```
-
-#### download with retries, back off and checksum
-```bash
-webpath download https://speed.hetzner.de/100MB.bin 100MB.bin \
-                 --retries 4 --backoff 0.5 \
-                 --checksum blahblahblah…
-```
-
-### Flags for cli
-```
-Options:
-
-Flag	Description	Default
--p, --pretty	Pretty-print JSON responses	off
--r, --retries	Number of retry attempts	0
--b, --backoff	Back off factor in seconds	0.3
-```
-
-# WebPath Tutorial
-
-## Step 1 - CoinGecko’s API
-
-CoinGecko exposes an **unauthenticated** REST API at  
-`https://api.coingecko.com/api/v3/`.
-
-Most market endpoints live under `/coins/markets`.  
-Example (unfriendly style):
-
-```
-GET https://api.coingecko.com/api/v3/coins/markets
-     ?vs_currency=usd
-     &ids=bitcoin,ethereum,dogecoin
-     &order=market_cap_desc
-     &per_page=3
-     &page=1
-     &sparkline=false
-```
-
----
-
-## Step 2 - Step by step with WebPath
-
-```python
-from webpath import WebPath
-
-# create a base path (it behaves like pathlib.Path)
-api = WebPath("https://api.coingecko.com/api/v3")
-
-markets = api / "coins" / "markets"
-
-# attach query parameters in plain Python
-coins   = ["bitcoin", "ethereum", "dogecoin", "matic-network"]
-params  = dict(
-    vs_currency = "usd",
-    ids         = ",".join(coins),
-    order       = "market_cap_desc",
-    per_page    = len(coins),
-    sparkline   = "false"
-)
-url = markets.with_query(**params)
-
-print(url)
-# -> https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin,...
-```
-
-### Quick sanity check
-
-```python
-print(url.curl())
-url.inspect()
-
-### What it looks like
-
-┌──────── Response ────────┐
-│ 200 OK * 147 ms * 3 KB   │
-└──────────────────────────┘
-┌──────── Response Body ───┐
-{                          |
-  "id": "bitcoin",         |
-  "name": "Bitcoin",       |
-  …                        |
-└──────────────────────────┘
-┌──────── Headers ─────────┐
-content-type  application/json
-…
-└──────────────────────────┘
-</details>
-
-```
-
----
-
-## Step 3 - Fetching & Caching
-
-```python
-data = url.with_cache(ttl=120).get().json()
-
-# .. second call < 2 min later is served instantly from disk
-```
-
-*The cache is stored in `~/.webpath/cache` by default and strips auth headers automatically.*
-
----
-
-## Step 4 -  Extraction
-
-Each coin object looks like (truncated):
-
-```json
-{
-  "id": "bitcoin",
-  "symbol": "btc",
-  "name": "Bitcoin",
-  "current_price": 68123,
-  "price_change_percentage_24h": -2.17,
-  
-}
-```
-
-You can use normal indexing *or* WebPath’s helpers:
-
-```python
-rows = []
-for coin in data:
-    r = WebPath.from_json(coin)
-    rows.append((
-        r["name"],
-        f"${r['current_price']:,}",
-        f"{r.find('price_change_percentage_24h'):+.2f} %"
-    ))
-```
-
----
-
-## Step 5 - Print a Table (optional)
-
-```python
-from tabulate import tabulate
-from rich.console import Console
-
-console = Console()
-
-rows.sort(key=lambda x: float(x[2].replace('%', '')), reverse=True)
-
-console.print(
-    tabulate(rows, headers=["Coin", "Price (USD)", "24 h %"], tablefmt="rounded_outline")
+# step 1. Create the client with a base URL, shared headers, and retries
+#    The client can be used for the lifetime of your application.
+api = Client(
+    "[https://api.github.com](https://api.github.com)",
+    headers={"Accept": "application/vnd.github.v3+json"},
+    retries=3,
+    timeout=10.0
 )
 
-## Sample output**
+# step 2. make sync requests
+repo_info = api.get("repos", "python", "cpython")
+print(f"Repo Description: {repo_info.find('description')}")
 
-╭────────┬──────────────┬─────────╮
-│ Coin   │ Price (USD)  │ 24 h %  │
-├────────┼──────────────┼─────────┤
-│ Dogecoin │ $0.245     │ +3.18 % │
-│ Bitcoin  │ $68,123    │ -2.17 % │
-│ …        │ …          │ …       │
-╰────────┴──────────────┴─────────╯
+# step 3. make async requests
+async def get_user_name():
+    user_info = await api.aget("users", "torvalds")
+    print(f"User's Name: {user_info.find('name')}")
+
+asyncio.run(get_user_name())
+
+
+# step 4. use the context manager to ensure connections are closed
+try:
+    with Client("[https://httpbin.org](https://httpbin.org)", retries=2) as http:
+        http.get("status/503")
+except Exception as e:
+    print(f"\nRequest failed as expected: {e}")
+finally:
+    ## **Always close the client when you're done**
+    api.close()
 ```
 
----
+# Core Features
 
-## Step 6 - Making It Reusable
+* Client-based Sessions: Manages connection pooling, default headers, retries, caching, and rate limiting for the API
 
-Create a tiny helper module `crypto.py`:
+* URL Building: Chain path segments with the `/` operator (e.g. `api/"users"/123`).
+
+* JSON Traversal: A jmespath-powered find() method lets you query complex JSON (e.g., resp.find("users[?age > 18].name")) . -- In future may change to `jonq` when the library is more stable
+
+* Async: Full async/await support for all HTTP verbs (aget, apost, etc.)
+
+* Retries: `Client` will auto handle transient network or server errors 
+
+* Response Caching: Add `.with_cache(ttl=120)` to any request to cache the response
+
+* File Downloads: `.download()` method with progress bars and checksum validation
+
+* Rate Limiting: Automatically throttle requests with `.with_rate_limit(requests_per_second=1)`.
+
+
+# Full Tutorial: Using the CoinGecko API
+
+## This tutorial will show you how to fetch cryptocurrency data using `webpath`
+
+1. Set Up the API Client
+
+First, create a Client (this is reusable) for the CoinGecko API. We'll set a 60-second TTL for caching
 
 ```python
-from webpath import WebPath
 
-API = WebPath("https://api.coingecko.com/api/v3") / "coins" / "markets"
+from webpath.core import Client
 
-def get_market(coins, currency="usd", ttl=120):
-    url = API.with_query(
-        vs_currency=currency,
-        ids=",".join(coins),
-        order="market_cap_desc",
-        per_page=len(coins),
-        sparkline="false"
-    ).with_cache(ttl=ttl)
-    return url.get().json()
+api = Client("[https://api.coingecko.com/api/v3](https://api.coingecko.com/api/v3)", cache_ttl=60)
 ```
 
-Now in any script / notebook:
+2. Fetch Market Data
+
+Now use the client to hit the endpoint. We can build the path and add query parameters in one call
 
 ```python
-from crypto import get_market
-print(get_market(["solana", "toncoin"], "eur")[0]["current_price"])
+coins = ["bitcoin", "ethereum", "dogecoin"]
+
+# build your path + query params
+market_data = api.get(
+    "coins", "markets",
+    params={
+        "vs_currency": "usd",
+        "ids": ",".join(coins),
+        "order": "market_cap_desc"
+    }
+)
 ```
 
----
+3. Extract Data with `find()`
+The response is a JSON array of objects. We can use `find()` with a `jmespath` expression to extract the names and prices from all coins
 
-## Step 7 - Going Further
+```python
 
-1. **Pagination** – CoinGecko allows `page=`; chain `.paginate()` to stream *everything*
-2. **Async** – replace `.get()` with `.aget()` inside `get_market` after  
-   `pip install "webpath[async]"`
-3. **Retries/Back off** – `url.get(retries=3, backoff=0.5)` for flaky networks
-4. **Downloads** – Need historical csv dumps? Use `.download()` with checksums
-5. **CLI** – `webpath get "$(crypto_url)" -p` to poke around quickly
+# jmes expression to get name and price
+expression = "[*].{name: name, price: current_price}"
+
+extracted_data = market_data.find(expression)
+
+for coin in extracted_data:
+    print(f"{coin['name']}: ${coin['price']:,}")
+
+## output example:
+## bitcoin: $120,000.00
+## ethereum: $5,432.00
+## dogecoin: $0.123
+```
+
+# CLI Usage
+
+* Join path segments
+
+```bash
+webpath join [https://api.example.com/v1](https://api.example.com/v1) users 42
+# [https://api.example.com/v1/users/42](https://api.example.com/v1/users/42)
+```
+
+* Simple-Get
+
+```bash
+webpath get [https://api.github.com/repos/python/cpython](https://api.github.com/repos/python/cpython) -p | jq '.stargazers_count'
+```
+
+* Get with retries
+
+```bash
+webpath get [https://httpbin.org/status/503](https://httpbin.org/status/503) --retries 3
+```
+
+* Download 
+
+```bash
+webpath download [https://speed.hetzner.de/100MB.bin](https://speed.hetzner.de/100MB.bin) 100MB.bin --checksum "5be551ef..."
+```

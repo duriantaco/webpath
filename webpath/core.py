@@ -1,6 +1,9 @@
 from __future__ import annotations
 import httpx
+import logging
 from urllib.parse import quote, urlencode, urlunsplit, parse_qsl, urlsplit
+from urllib3.util.retry import Retry
+
 from webpath._http import _sync_http_request, _async_http_request
 from webpath.downloads import download_file
 from webpath.cache import CacheConfig
@@ -13,8 +16,30 @@ def _idna(netloc):
     except UnicodeError:
         return netloc
 
+class _CallableBackoff(Retry):
+    def __init__(self, backoff_callable, **kwargs):
+        self.backoff_callable = backoff_callable
+        
+        kwargs.setdefault("total", 5)
+        kwargs.setdefault("backoff_factor", 0)
+        kwargs.setdefault("status_forcelist", None)
+        
+        super().__init__(**kwargs)
+
+    def get_backoff_time(self):
+        if not self.history:
+            return super().get_backoff_time()
+        
+        last_response = self.history[-1][2]
+        if last_response is None:
+            return super().get_backoff_time()
+        
+        try:
+            return self.backoff_callable(last_response)
+        except Exception:
+            return super().get_backoff_time()
+        
 class Client:
-    
     def __init__(
         self, 
         base_url,
@@ -22,18 +47,22 @@ class Client:
         headers=None,
         cache_ttl=None,
         cache_dir=None,
-        retries=None,
+        retries=3,
         backoff=None,
         jitter=None,
         rate_limit=None,
         enable_logging=False,
         auto_follow=False,
-        timeout=None
+        timeout=30,
     ):
         self.base_url = WebPath(base_url)
         
-        transport = httpx.HTTPTransport(retries=(retries or 0))
-        async_transport = httpx.AsyncHTTPTransport(retries=(retries or 0))
+        retry_policy = retries
+        if callable(retries) and not isinstance(retries, Retry):
+            retry_policy = _CallableBackoff(backoff_callable=retries)
+        
+        transport = httpx.HTTPTransport(retries=(retry_policy or 0))
+        async_transport = httpx.AsyncHTTPTransport(retries=(retry_policy or 0))
         
         self.sync_client = httpx.Client(
             headers=headers or {},
@@ -53,7 +82,7 @@ class Client:
             "headers": headers or {},
             "cache_ttl": cache_ttl,
             "cache_dir": cache_dir,
-            "retries": retries,
+            "retries": retry_policy,
             "backoff": backoff,
             "jitter": jitter,
             "rate_limit": rate_limit,
@@ -141,23 +170,17 @@ class WebPath:
         "_last_request_time", "_default_headers", "_retries", "_backoff", 
         "_jitter", "_timeout", "_sync_client", "_async_client"
     )    
+    
     def __init__(self, url):
         self._url = str(url)
         self._parts = urlsplit(self._url)
         self._trailing_slash = self._url.endswith("/") and not self._parts.path.endswith("/")
         self._cache = {}
         self._cache_config = None
-        self._allow_auto_follow = False
-        self._enable_logging = False
-        self._rate_limit = None
-        self._last_request_time = 0
         self._default_headers = {}
         self._retries = None
         self._backoff = 0.3
-        self._jitter = 0.0
-        self._timeout = None
-        self._sync_client = None
-        self._async_client = None
+        self._last_request_time = 0
 
     def __str__(self):
         return self._url
@@ -196,15 +219,15 @@ class WebPath:
         return self._parts.scheme
 
     @property
-    def netloc(self):     # pragma: no skylos
+    def netloc(self):
         return self._parts.netloc
 
     @property
-    def host(self):     # pragma: no skylos
+    def host(self):
         return _idna(self._parts.netloc.split("@")[-1].split(":")[0])
 
     @property
-    def port(self):     # pragma: no skylos
+    def port(self):
         if ":" in self._parts.netloc:
             return self._parts.netloc.rsplit(":", 1)[1]
         return None
@@ -222,7 +245,7 @@ class WebPath:
         return self._replace(path=new_path)
 
     @property
-    def parent(self):     # pragma: no skylos
+    def parent(self):
         parts = self._parts.path.rstrip("/").split("/")
         parent_path = "/".join(parts[:-1]) or "/"
         return self._replace(path=parent_path)
@@ -233,7 +256,7 @@ class WebPath:
         return path.split("/")[-1]
 
     @property
-    def suffix(self):     # pragma: no skylos
+    def suffix(self):
         dot = self.name.rfind(".")
         if dot == -1:
             return ""
@@ -244,7 +267,7 @@ class WebPath:
             return self
         return WebPath(self._url + "/")
 
-    def with_query(self, **params):     # pragma: no skylos
+    def with_query(self, **params):
         merged = dict(self.query)
         
         for key, value in params.items():
@@ -258,10 +281,10 @@ class WebPath:
         q_string = urlencode(merged, doseq=True, safe=":/")
         return self._replace(query=q_string)
 
-    def without_query(self):     # pragma: no skylos
+    def without_query(self):
         return self._replace(query="")
 
-    def with_fragment(self, tag):     # pragma: no skylos
+    def with_fragment(self, tag):
         return self._replace(fragment=quote(tag))
 
     def apply_config(self, config):
@@ -307,14 +330,17 @@ class WebPath:
         
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{item}'")
 
-    def with_cache(self, ttl=300, cache_dir=None):     # pragma: no skylos
+    def with_cache(self, ttl=300, cache_dir=None):
         return self._clone(_cache_config=CacheConfig(ttl, cache_dir))
   
-    def with_logging(self, enabled=True):     # pragma: no skylos
+    def with_logging(self, enabled=True):
         return self._clone(_enable_logging=enabled)
 
     def with_rate_limit(self, requests_per_second=1.0):
         return self._clone(_rate_limit=requests_per_second, _last_request_time=0)
+
+    def with_retries(self, retries):
+        return self._clone(_retries=retries)
 
     def _clone(self, **updates):
         new_path = WebPath(self._url)
@@ -330,9 +356,6 @@ class WebPath:
         new_headers = self._default_headers.copy()
         new_headers.update(headers)
         return self._clone(_default_headers=new_headers)
-        
-    def with_retries(self, retries, backoff=0.3, jitter=0.0):
-        return self._clone(_retries=retries, _backoff=backoff, _jitter=jitter)
     
     def session(self, **kw):
         return httpx.Client(**kw)

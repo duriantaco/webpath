@@ -1,9 +1,8 @@
 from __future__ import annotations
 import time
+import logging
 from urllib.parse import urlsplit
 import httpx
-from pydantic import TypeAdapter, ValidationError
-import warnings
 import json
 import jmespath
 from rich.console import Console
@@ -13,7 +12,6 @@ from rich.panel import Panel
 from rich import box
 import asyncio
 
-# _HTTP_VERBS = ("get", "post", "put", "patch", "delete", "head", "options")
 _HTTP_SCHEMES = ("http", "https")
 
 class CachedResponse:
@@ -44,7 +42,11 @@ class WebResponse:
         data = self.json_data
         
         if ' || ' in expression:
-            expressions = [expr.strip() for expr in expression.split(' || ')]
+            parts = expression.split(' || ')
+            expressions = []
+            for part in parts:
+                expressions.append(part.strip())
+
             for expr in expressions:
                 result = jmespath.search(expr, data)
                 if result is not None:
@@ -56,7 +58,12 @@ class WebResponse:
 
     def find_all(self, expression):
         result = self.find(expression, default=[])
-        return result if isinstance(result, list) else [result] if result else []
+        if not result:
+            return []
+        if isinstance(result, list):
+            return result
+        return [result]
+
 
     def extract(self, *expressions, flatten=False):
         if len(expressions) == 1:
@@ -80,12 +87,6 @@ class WebResponse:
         result = self.find(expression, default=sentinel)
         return result is not sentinel
 
-    def get_errors(self):
-        return self.find("error || message")
-
-    def get_ids(self):
-        return self.find("id || _id")
-
     def get_pagination_info(self):
         return {
             'next': self.find("next || next_url || pagination.next"),
@@ -103,19 +104,6 @@ class WebResponse:
 
     def json(self):
         return self._response.json()
-    
-    def parse(self, model=None, strict=False):
-        data = self.json()
-        if model is None:
-            return data
-        
-        try:
-            return TypeAdapter(model).validate_python(data)
-        except ValidationError as exc:
-            if strict:
-                raise
-            warnings.warn(f"Validation failed - returning raw data: {exc}")
-            return data
         
     def __truediv__(self, key):
         data = self.json_data
@@ -144,7 +132,9 @@ class WebResponse:
     
     def __contains__(self, key):
         data = self.json_data
-        return isinstance(data, dict) and key in data
+        if not isinstance(data, dict):
+            return False
+        return key in data
     
     def get(self, key, default=None):
         data = self.json_data
@@ -154,32 +144,76 @@ class WebResponse:
     
     def keys(self):
         data = self.json_data
-        return data.keys() if isinstance(data, dict) else []
-    
+        if isinstance(data, dict):
+            return data.keys()
+        return []
+
+        
     def values(self):
         data = self.json_data
-        return data.values() if isinstance(data, dict) else []
+        if isinstance(data, dict):
+            return data.values()
+        return []
 
     def items(self):
         data = self.json_data
-        return data.items() if isinstance(data, dict) else []
+        if isinstance(data, dict):
+            return data.items()
+        return []
     
-    def inspect(self):
-        console = Console()
-        
-        status_color = "green" if 200 <= self.status_code < 300 else "red" if self.status_code >= 400 else "yellow"
-        status_text = f"[{status_color}]{self.status_code}[/{status_color}] {getattr(self._response, 'reason_phrase', 'OK')}"
+    def inspect(self, logger=None):
+        if self.status_code >= 400:
+            status_color = "red"
+        elif self.status_code >= 200:
+            status_color = "green" 
+        else:
+            status_color = "yellow"
+
+        status_text = f"{self.status_code} {getattr(self._response, 'reason_phrase', 'OK')}"
         
         elapsed = getattr(self._response, 'elapsed', None)
-        time_text = f"{int(elapsed.total_seconds() * 1000)}ms" if elapsed else "unknown"
-        
+        if elapsed:
+            time_text = f"{int(elapsed.total_seconds() * 1000)}ms"
+        else:
+            time_text = "unknown"
+
         size_text = f"{len(self.content):,} bytes"
         
-        status_info = f"{status_text} * {time_text} * {size_text}"
-        console.print(Panel(status_info, title="Response", border_style="blue"))
-        
-        self._print_response_body(console)
-        self._print_headers(console)
+        if logger:
+            status_info = f"Response: {status_text} | Elapsed: {time_text} | Size: {size_text}"
+            
+            headers_str = ""
+            for k, v in self.headers.items():
+                headers_str += f"  {k}: {v}\n"
+            headers_str = headers_str.rstrip()
+
+            
+            content_type = self.headers.get('content-type', '').lower()
+            def truncate_text(text, limit=500):
+                if len(text) > limit:
+                    return text[:limit] + "..."
+                return text
+
+            if 'json' in content_type:
+                try:
+                    body_preview = json.dumps(self.json_data, indent=2)
+                    body_preview = truncate_text(body_preview, 1000)
+                except Exception:
+                    body_preview = truncate_text(self.text)
+            else:
+                body_preview = truncate_text(self.text)
+
+            logger.info(f"HTTP Response Inspection:\n{status_info}")
+            logger.info(f"Headers:\n{headers_str}")
+            logger.info(f"Body Preview:\n{body_preview}")
+        else:
+            console = Console()
+            
+            status_info = f"[{status_color}]{status_text}[/{status_color}] * {time_text} * {size_text}"
+            console.print(Panel(status_info, title="Response", border_style="blue"))
+            
+            self._print_response_body(console)
+            self._print_headers(console)
 
     def _print_response_body(self, console):
         content_type = self.headers.get('content-type', '').lower()
@@ -374,18 +408,28 @@ async def _handle_rate_limit_async(url):
         url._last_request_time = time.time()
 
 def _handle_logging(verb, url_str, resp, url_obj):
-    if getattr(url_obj, '_enable_logging', False):
-        console = Console()
-        
-        elapsed_ms = 0
-        if hasattr(resp, 'elapsed'):
+    logger = getattr(url_obj, '_enable_logging', False)
+    if logger:
+        try:
             elapsed_ms = int(resp.elapsed.total_seconds() * 1000)
-        
-        status_color = ("green" if 200 <= resp.status_code < 300 
-                       else "red" if resp.status_code >= 400 
-                       else "yellow")
-        
-        console.print(f"{verb.upper()} {url_str} → [{status_color}]{resp.status_code}[/{status_color}] ({elapsed_ms}ms)")
+        except AttributeError:
+            elapsed_ms = 0
+
+        log_message = f"{verb.upper()} {url_str} -> {resp.status_code} ({elapsed_ms}ms)"
+
+        if isinstance(logger, logging.Logger):
+            if 200 <= resp.status_code < 300:
+                logger.info(log_message)
+            elif resp.status_code >= 400:
+                logger.warning(log_message)
+            else:
+                logger.info(log_message)
+        else:
+            status_color = ("green" if 200 <= resp.status_code < 300
+                           else "red" if resp.status_code >= 400
+                           else "yellow")
+            console = Console()
+            console.print(f"{verb.upper()} {url_str} -> [{status_color}]{resp.status_code}[/{status_color}] ({elapsed_ms}ms)")
 
 def _get_helpful_error_message(response, url):
     hostname = urlsplit(url).hostname

@@ -27,9 +27,10 @@ class CacheConfig:
             with cache_path.open('r') as f:
                 cached = json.load(f)
             
-            if time.time() - cached['timestamp'] > self.ttl:
-                cache_path.unlink(missing_ok=True)
-                return None
+            if self.ttl is not None:
+                if time.time() - cached['timestamp'] > self.ttl:
+                    cache_path.unlink(missing_ok=True)
+                    return None
             
             return cached
         except (json.JSONDecodeError, KeyError, OSError):
@@ -53,7 +54,7 @@ class CacheConfig:
             'status_code': response.status_code,
             'headers': safe_headers,
             'content': response.content.decode('utf-8', errors='ignore'),
-            'url': response.url
+            'url': str(response.url) 
         }
         
         try:

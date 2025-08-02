@@ -38,6 +38,16 @@ class WebResponse:
     def __getattr__(self, name):
         return getattr(self._response, name)
     
+    def iter_content(self, chunk_size=8192):
+        if hasattr(self._response, 'iter_bytes'):
+            yield from self._response.iter_bytes(chunk_size=chunk_size)
+        elif hasattr(self._response, 'iter_content'):
+            yield from self._response.iter_content(chunk_size=chunk_size)
+        else:
+            content = self.content
+            for i in range(0, len(content), chunk_size):
+                yield content[i:i+chunk_size]
+    
     def find(self, expression, default=None):
         data = self.json_data
         
@@ -54,7 +64,9 @@ class WebResponse:
             return default
         else:
             result = jmespath.search(expression, data)
-            return result if result is not None else default
+            if result is not None:
+                return result
+            return default
 
     def find_all(self, expression):
         result = self.find(expression, default=[])
@@ -186,7 +198,6 @@ class WebResponse:
             for k, v in self.headers.items():
                 headers_str += f"  {k}: {v}\n"
             headers_str = headers_str.rstrip()
-
             
             content_type = self.headers.get('content-type', '').lower()
             def truncate_text(text, limit=500):
@@ -320,31 +331,45 @@ def _sync_http_request(verb, url, *a, client=None, retries=None, **kw):
     cache_config = getattr(url, '_cache_config', None)
     
     url_str = str(url)
-    scheme = getattr(url, 'scheme', urlsplit(url).scheme)
+    scheme = getattr(url, 'scheme', urlsplit(url_str).scheme)
     
     if scheme not in _HTTP_SCHEMES:
         raise ValueError(f"{verb.upper()} only valid for http/https URLs")
 
-    if cache_config:
+    is_streaming = kw.pop('stream', False)
+
+    if cache_config and not is_streaming:
         cached = cache_config.get(verb, url_str)
         if cached:
             return WebResponse(CachedResponse(cached), url)
 
     if client:
-        resp = getattr(client, verb)(url_str, *a, **kw)
+        if is_streaming:
+            resp = client.stream(verb.upper(), url_str, **kw)
+            resp = resp.__enter__()
+        else:
+            resp = getattr(client, verb)(url_str, **kw)
     elif retries:
         transport = httpx.HTTPTransport(retries=retries)
         with httpx.Client(transport=transport) as temp_client:
-            resp = getattr(temp_client, verb)(url_str, *a, **kw)
+            if is_streaming:
+                resp = temp_client.stream(verb.upper(), url_str, **kw)
+                resp = resp.__enter__()
+            else:
+                resp = getattr(temp_client, verb)(url_str, *a, **kw)
     else:
         with httpx.Client() as temp_client:
-            resp = getattr(temp_client, verb)(url_str, *a, **kw)
+            if is_streaming:
+                resp = temp_client.stream(verb.upper(), url_str, **kw)
+                resp = resp.__enter__()
+            else:
+                resp = getattr(temp_client, verb)(url_str, *a, **kw)
 
     if 400 <= resp.status_code < 600:
         error_msg = _get_helpful_error_message(resp, url_str)
         raise httpx.HTTPStatusError(error_msg, request=resp.request, response=resp)
 
-    if cache_config and 200 <= resp.status_code < 300:
+    if cache_config and not is_streaming and resp.status_code >= 200 and resp.status_code < 300:
         cache_config.set(verb, url_str, resp)
     
     _handle_rate_limit(url)
@@ -356,7 +381,7 @@ async def _async_http_request(verb, url, *a, client=None, retries=None, **kw):
     cache_config = getattr(url, '_cache_config', None)
     
     url_str = str(url)
-    scheme = getattr(url, 'scheme', urlsplit(url).scheme)
+    scheme = getattr(url, 'scheme', urlsplit(url_str).scheme)
     
     if scheme not in _HTTP_SCHEMES:
         raise ValueError(f"{verb.upper()} only valid for http/https URLs")
@@ -367,7 +392,7 @@ async def _async_http_request(verb, url, *a, client=None, retries=None, **kw):
             return WebResponse(CachedResponse(cached), url)
 
     if client:
-        resp = await getattr(client, verb)(url_str, *a, **kw)
+        resp = await getattr(client, verb)(url_str, **kw)
     elif retries:
         transport = httpx.AsyncHTTPTransport(retries=retries)
         async with httpx.AsyncClient(transport=transport) as temp_client:
@@ -425,9 +450,14 @@ def _handle_logging(verb, url_str, resp, url_obj):
             else:
                 logger.info(log_message)
         else:
-            status_color = ("green" if 200 <= resp.status_code < 300
-                           else "red" if resp.status_code >= 400
-                           else "yellow")
+
+            if resp.status_code >= 200 and resp.status_code < 300:
+                status_color = "green"
+            elif resp.status_code >= 400:
+                status_color = "red"
+            else:
+                status_color = "yellow"
+
             console = Console()
             console.print(f"{verb.upper()} {url_str} -> [{status_color}]{resp.status_code}[/{status_color}] ({elapsed_ms}ms)")
 

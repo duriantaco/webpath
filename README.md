@@ -18,7 +18,9 @@ A Python HTTP client library that makes interacting with APIs with lesser boiler
 
 `webpath` tries to integrate the lifecycle of an API request. Eg, from building the URL to processing the response.
 
-**Without `webpath`**, you manually wire together multiple libraries and steps as shown in the example below:
+### **Without `webpath`** 
+
+You manually wire together multiple libraries and steps as shown in the example below:
 
 ```python
 import httpx
@@ -44,6 +46,25 @@ description = jmespath.search("description", data)
 print(description)
 ```
 
+### **With** webpath
+
+The entire process is a single chain managed by `Client`:
+
+```Python
+
+from webpath.core import Client
+
+# step 1.. create a reusable client for the API
+with Client(
+    "[https://api.github.com](https://api.github.com)",
+    headers={"Accept": "application/vnd.github.v3+json"},
+    retries=3
+) as api:
+    # step 2.. find the data in one line
+    description = api.get("repos", "python", "cpython").find("description")
+    print(description)
+```
+
 # Installation
 
 # Core features (includes httpx and jmespath)
@@ -53,6 +74,9 @@ pip install webpath
 pip install "webpath[progress]"
 
 # Quick Start
+
+## Client Usage 
+
 ```python
 from webpath.core import Client
 import asyncio
@@ -89,22 +113,35 @@ finally:
     api.close()
 ```
 
+## Retries with a Pluggable Policy
+
+```python
+import httpx
+
+## create your custom backoff logic
+def retry_backoff(response):
+    if "Retry-After" in response.headers:
+        wait_time = float(response.headers["Retry-After"])
+        print(f"rate limited, sleeping {wait_time}s")
+        return wait_time
+
+## pass your custom logic into client
+with Client("https://httpbin.org", retries=retry_backoff) as client:
+    try:
+        client.get("status/429")
+    except httpx.HTTPStatusError as e:
+        print(f"still failed: {e}")
+```
+
 # Core Features
 
 * Client-based Sessions: Manages connection pooling, default headers, retries, caching, and rate limiting for the API
-
 * URL Building: Chain path segments with the `/` operator (e.g. `api/"users"/123`).
-
 * JSON Traversal: A jmespath-powered find() method lets you query complex JSON (e.g., resp.find("users[?age > 18].name")) . -- In future may change to `jonq` when the library is more stable
-
 * Async: Full async/await support for all HTTP verbs (aget, apost, etc.)
-
 * Retries: `Client` will auto handle transient network or server errors 
-
 * Response Caching: Add `.with_cache(ttl=120)` to any request to cache the response
-
 * File Downloads: `.download()` method with progress bars and checksum validation
-
 * Rate Limiting: Automatically throttle requests with `.with_rate_limit(requests_per_second=1)`.
 
 

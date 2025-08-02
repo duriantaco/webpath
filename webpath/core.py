@@ -1,12 +1,12 @@
 from __future__ import annotations
 import httpx
-import logging
 from urllib.parse import quote, urlencode, urlunsplit, parse_qsl, urlsplit
 from urllib3.util.retry import Retry
-
+from pathlib import Path
+import hashlib
 from webpath._http import _sync_http_request, _async_http_request
-from webpath.downloads import download_file
 from webpath.cache import CacheConfig
+from tqdm import tqdm
 
 _HTTP_VERBS = ("get", "post", "put", "patch", "delete", "head", "options")
 
@@ -181,6 +181,15 @@ class WebPath:
         self._retries = None
         self._backoff = 0.3
         self._last_request_time = 0
+        self._headers = None
+        self._client = None
+        self._allow_auto_follow = None
+        self._enable_logging = False
+        self._rate_limit = None
+        self._jitter = None
+        self._timeout = None
+        self._sync_client = None
+        self._async_client = None
 
     def __str__(self):
         return self._url
@@ -346,7 +355,8 @@ class WebPath:
         new_path = WebPath(self._url)
         for attr in self.__slots__:
             if attr not in ('_url', '_parts'):
-                setattr(new_path, attr, getattr(self, attr))
+                value = getattr(self, attr, None)
+                setattr(new_path, attr, value)
         
         for key, value in updates.items():
             setattr(new_path, key, value)
@@ -361,13 +371,54 @@ class WebPath:
         return httpx.Client(**kw)
 
     def download(self, dest, **kw):
-        if self._retries is not None and "retries" not in kw:
-            kw["retries"] = self._retries
+        dest = Path(dest)
+        chunk_size = kw.get('chunk', 8192)
+        show_progress = kw.get('progress', True)
+        checksum = kw.get('checksum')
+        algorithm = kw.get('algorithm', 'sha256')
+
+        headers = self._default_headers.copy()
+        headers.update(kw.get('headers', {}))
         
-        if "backoff" not in kw:
-            kw["backoff"] = self._backoff
+        bar = None
+        try:
+            with httpx.Client(follow_redirects=True) as client:
+                with client.stream('GET', str(self), headers=headers) as response:
+                    response.raise_for_status()
+                    
+                    total = int(response.headers.get("content-length", 0))
+
+                    hasher = None
+                    if checksum:
+                        hasher = hashlib.new(algorithm)
+                    
+                    if show_progress and total > 0:
+                        try:
+                            bar = tqdm(total=total, unit="B", unit_scale=True, leave=False, desc=dest.name)
+                        except ImportError:
+                            pass
+                    
+                    with dest.open("wb") as f:
+                        for chunk in response.iter_bytes(chunk_size):
+                            f.write(chunk)
+                            if hasher:
+                                hasher.update(chunk)
+                            if bar:
+                                bar.update(len(chunk))
         
-        return download_file(self, dest, **kw)
+        except Exception:
+            if dest.exists():
+                dest.unlink(missing_ok=True)
+            raise
+        finally:
+            if bar:
+                bar.close()
+        if checksum and hasher:
+            if hasher.hexdigest() != checksum.lower():
+                dest.unlink(missing_ok=True)
+                raise ValueError(f"Checksum mismatch: expected {checksum}, got {hasher.hexdigest()}")
+            
+        return dest
 
     def _replace(self, **patch):
         parts = self._parts._replace(**patch)
